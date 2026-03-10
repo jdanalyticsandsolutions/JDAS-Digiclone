@@ -3,8 +3,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONFIG — swap API_BASE to your Render URL when live
 ═══════════════════════════════════════════════════════════════════ */
-const API_BASE = "https://jdas-digital-clone-api.onrender.com"; // ← your Render URL
-const USE_MOCK = true; // flip to false once API is live + Dataverse connected
+const API_BASE = "https://jdas-digiclone-1.onrender.com";
+const USE_MOCK = false;
 
 /* ═══════════════════════════════════════════════════════════════════
    DESIGN TOKENS
