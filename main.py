@@ -1,219 +1,363 @@
-# JDAS Digital Clone — Microsoft Dataverse Schema
-# =================================================
-# This file defines all tables, columns, and relationships
-# needed to wire the 18 engine blocks into Dataverse.
-#
-# HOW TO USE:
-#   1. Open Power Apps → Dataverse → Tables
-#   2. Create each table below using the column definitions
-#   3. Set relationships as defined in RELATIONSHIPS section
-#   4. Use Power Automate to sync data from Excel uploads → Dataverse
-#   5. The FastAPI /update-inputs endpoint writes here via the Dataverse Web API
-#
-# NAMING CONVENTION:
-#   All custom tables prefixed: jdas_
-#   All custom columns prefixed: jdas_
-#   Follows Dataverse naming rules (no spaces, lowercase, underscores)
+"""
+JDAS Digital Clone — FastAPI Application
+=========================================
+Public-facing API endpoints for the JDAS Business Intelligence engine.
 
-TABLES = {
+Endpoints:
+  GET  /                    Health check
+  GET  /snapshot            Current business state (read-only)
+  POST /predict             Run simulation with custom inputs
+  POST /stress-test         Run multiple scenarios, return comparison
+  GET  /dashboard           Full dashboard data package
+  POST /update-inputs       Persist new business inputs (Dataverse)
+"""
 
-    # ── CORE: Business Snapshot (one row per week) ────────────────────────────
-    "jdas_business_snapshot": {
-        "display_name": "JDAS Business Snapshot",
-        "description": "Weekly snapshot of all engine outputs. One row per week.",
-        "primary_key": "jdas_snapshotid",
-        "columns": {
-            "jdas_snapshotid":          {"type": "uniqueidentifier", "required": True,  "description": "Auto-generated PK"},
-            "jdas_week_start":          {"type": "datetime",         "required": True,  "description": "Week start date (Monday)"},
-            "jdas_created_at":          {"type": "datetime",         "required": True,  "description": "Timestamp of record creation"},
-            # Cash
-            "jdas_cash_on_hand":        {"type": "money",            "required": True,  "description": "Cash in bank at snapshot"},
-            "jdas_weekly_burn":         {"type": "money",            "required": True,  "description": "Weekly cash outflow"},
-            "jdas_weekly_in":           {"type": "money",            "required": False, "description": "Weekly cash inflow"},
-            "jdas_net_cash_12w":        {"type": "money",            "required": False, "description": "Projected net cash over 12 weeks"},
-            "jdas_ending_cash_12w":     {"type": "money",            "required": False, "description": "Projected ending cash at week 12"},
-            "jdas_survival_runway_mo":  {"type": "decimal",          "required": False, "description": "Months of cash runway"},
-            "jdas_cash_status":         {"type": "nvarchar(50)",     "required": False, "description": "HEALTHY / LOW / CRITICAL / NEGATIVE CASH"},
-            "jdas_tax_reserve_12w":     {"type": "money",            "required": False, "description": "Tax reserve to set aside"},
-            # Workload
-            "jdas_active_workload_hrs": {"type": "decimal",          "required": True,  "description": "Total hours on active projects"},
-            "jdas_sustainable_cap_wk":  {"type": "decimal",          "required": False, "description": "Sustainable hours/week (owner + subs)"},
-            "jdas_backlog_hrs":         {"type": "decimal",          "required": False, "description": "Hours of backlog beyond capacity"},
-            "jdas_delay_days":          {"type": "integer",          "required": False, "description": "Current client wait time in days"},
-            "jdas_capacity_stress":     {"type": "decimal",          "required": False, "description": "Capacity stress score 0-100"},
-            "jdas_workload_status":     {"type": "nvarchar(50)",     "required": False, "description": "OK / TIGHT / OVERLOADED"},
-            # Pipeline
-            "jdas_leads_per_week":      {"type": "decimal",          "required": False, "description": "Total leads per week"},
-            "jdas_qualified_per_week":  {"type": "decimal",          "required": False, "description": "Qualified leads per week"},
-            "jdas_win_rate":            {"type": "decimal",          "required": False, "description": "Effective close rate 0-1"},
-            "jdas_avg_project_value":   {"type": "money",            "required": False, "description": "Average project value ($)"},
-            "jdas_revenue_12w":         {"type": "money",            "required": False, "description": "Projected invoiced revenue 12 weeks"},
-            "jdas_cash_collected_12w":  {"type": "money",            "required": False, "description": "Cash expected to collect in 12 weeks"},
-            # Quality
-            "jdas_quality_score":       {"type": "decimal",          "required": False, "description": "Service quality score 0-100"},
-            "jdas_quality_label":       {"type": "nvarchar(50)",     "required": False, "description": "Excellent / Good / Poor / Critical"},
-            "jdas_rework_rate":         {"type": "decimal",          "required": False, "description": "Rework fraction 0-1"},
-            "jdas_retention_likelihood":{"type": "decimal",          "required": False, "description": "Probability client returns 0-1"},
-            "jdas_referral_likelihood": {"type": "decimal",          "required": False, "description": "Probability of referral 0-1"},
-            "jdas_churn_risk":          {"type": "nvarchar(50)",     "required": False, "description": "Low / Medium / High"},
-            "jdas_reaction_score":      {"type": "decimal",          "required": False, "description": "Customer reaction score 0-100"},
-            # Recurring
-            "jdas_mrr":                 {"type": "money",            "required": False, "description": "Current monthly recurring revenue"},
-            "jdas_mrr_month12":         {"type": "money",            "required": False, "description": "Projected MRR at month 12"},
-            "jdas_mrr_stability":       {"type": "decimal",          "required": False, "description": "MRR stability score 0-100"},
-            "jdas_retainer_clients":    {"type": "integer",          "required": False, "description": "Number of active retainer clients"},
-            "jdas_mrr_churn_flag":      {"type": "nvarchar(50)",     "required": False, "description": "STABLE / AT RISK / TOO VOLATILE"},
-            # Labor
-            "jdas_team_capacity_wk":    {"type": "decimal",          "required": False, "description": "Total team capacity hours/week"},
-            "jdas_labor_cost_monthly":  {"type": "money",            "required": False, "description": "Total labor cost per month"},
-            "jdas_gross_labor_margin":  {"type": "decimal",          "required": False, "description": "Labor gross margin 0-1"},
-            "jdas_hire_trigger":        {"type": "nvarchar(50)",     "required": False, "description": "OK / HIRE TRIGGER"},
-            # XP
-            "jdas_xp_score":            {"type": "integer",          "required": False, "description": "Business score 0-100"},
-            "jdas_xp_level":            {"type": "integer",          "required": False, "description": "Level 1-5"},
-            "jdas_xp_title":            {"type": "nvarchar(100)",    "required": False, "description": "Level title string"},
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+import datetime
+
+from engine import BusinessInputs, run_all, to_dict
+
+# ─── APP SETUP ────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="JDAS Digital Clone API",
+    description="Business intelligence engine for JD Analytics & Solutions LLC. "
+                "Powers the Digital Clone dashboard — snapshot, prediction, and stress-test endpoints.",
+    version="1.0.0",
+    contact={
+        "name": "JD Analytics & Solutions LLC",
+        "url": "https://www.jdanalyticsandsolutions.com",
+        "email": "JasonDrunasky@jdanalyticsandsolutions.com",
+    },
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # Lock down to your domain in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── THE SQUEEZE — default live snapshot ─────────────────────────────────────
+# In production this comes from Dataverse. Here it's the baseline stressed state.
+
+LIVE_INPUTS = BusinessInputs(
+    base_leads_per_week=2.0,
+    marketing_multiplier=1.0,
+    active_workload_hrs=47.0,
+    owner_total_hours_week=20.0,
+    admin_hours_week=6.0,
+    utilization_target=0.85,
+    num_active_projects=4,
+    num_subcontractors=0,
+    owner_billing_rate=95.0,
+    owner_cost_rate=45.0,
+    owner_draw_monthly=3000.0,
+    base_hourly_rate=95.0,
+    avg_hours_per_project=15.0,
+    base_win_rate=0.45,
+    fixed_monthly_expenses=450.0,
+    variable_monthly_expenses=100.0,
+    starting_cash=2100.0,
+    tax_reserve_rate=0.25,
+    current_retainer_clients=0,
+    avg_retainer_value_monthly=800.0,
+    current_month=3,
+)
+
+
+# ─── PYDANTIC MODELS ──────────────────────────────────────────────────────────
+
+class InputsPayload(BaseModel):
+    """Owner-editable business inputs for prediction / stress-test calls."""
+    base_leads_per_week: Optional[float] = Field(None, description="Base leads per week from outreach/networking")
+    marketing_multiplier: Optional[float] = Field(None, ge=0.5, le=5.0)
+    active_workload_hrs: Optional[float] = Field(None, ge=0, description="Current hours on active projects")
+    owner_total_hours_week: Optional[float] = Field(None, ge=1, le=80)
+    admin_hours_week: Optional[float] = Field(None, ge=0)
+    num_subcontractors: Optional[int] = Field(None, ge=0, le=20)
+    owner_billing_rate: Optional[float] = Field(None, ge=10)
+    owner_draw_monthly: Optional[float] = Field(None, ge=0)
+    base_hourly_rate: Optional[float] = Field(None, ge=10)
+    avg_hours_per_project: Optional[float] = Field(None, ge=1)
+    base_win_rate: Optional[float] = Field(None, ge=0.01, le=1.0)
+    fixed_monthly_expenses: Optional[float] = Field(None, ge=0)
+    variable_monthly_expenses: Optional[float] = Field(None, ge=0)
+    starting_cash: Optional[float] = Field(None)
+    current_retainer_clients: Optional[int] = Field(None, ge=0)
+    avg_retainer_value_monthly: Optional[float] = Field(None, ge=0)
+    current_month: Optional[int] = Field(None, ge=1, le=12)
+    num_active_projects: Optional[int] = Field(None, ge=0)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "base_leads_per_week": 4.0,
+                "num_subcontractors": 1,
+                "owner_billing_rate": 110.0,
+                "owner_draw_monthly": 2500.0,
+                "current_retainer_clients": 2,
+            }
         }
-    },
 
-    # ── INPUTS: Business Inputs (owner edits these) ───────────────────────────
-    "jdas_business_inputs": {
-        "display_name": "JDAS Business Inputs",
-        "description": "Owner-editable business inputs. One active row per business. "
-                       "Updated via the dashboard or POST /update-inputs.",
-        "primary_key": "jdas_inputsid",
-        "columns": {
-            "jdas_inputsid":                    {"type": "uniqueidentifier", "required": True},
-            "jdas_business_name":               {"type": "nvarchar(200)",    "required": True,  "description": "Client business name"},
-            "jdas_owner_name":                  {"type": "nvarchar(200)",    "required": False, "description": "Owner name"},
-            "jdas_industry":                    {"type": "nvarchar(100)",    "required": False, "description": "Industry / business type"},
-            "jdas_effective_date":              {"type": "datetime",         "required": True,  "description": "Date these inputs became active"},
-            "jdas_is_active":                   {"type": "boolean",          "required": True,  "description": "Is this the current active input set?"},
-            # Owner time
-            "jdas_owner_total_hrs_wk":          {"type": "decimal",          "required": True,  "description": "Owner total available hours/week"},
-            "jdas_admin_hrs_wk":                {"type": "decimal",          "required": True,  "description": "Admin/non-billable hours/week"},
-            "jdas_utilization_target":          {"type": "decimal",          "required": False, "description": "Target utilization 0-1 (default 0.85)"},
-            # Workload
-            "jdas_active_workload_hrs":         {"type": "decimal",          "required": True,  "description": "Current active project hours"},
-            "jdas_num_active_projects":         {"type": "integer",          "required": False, "description": "Number of active projects"},
-            # Team
-            "jdas_num_subcontractors":          {"type": "integer",          "required": False, "description": "Active subcontractors"},
-            "jdas_avg_sub_hrs_wk":              {"type": "decimal",          "required": False, "description": "Avg sub hours available/week"},
-            "jdas_owner_billing_rate":          {"type": "money",            "required": True,  "description": "Owner hourly billing rate"},
-            "jdas_owner_cost_rate":             {"type": "money",            "required": False, "description": "Owner hourly cost to business"},
-            "jdas_avg_sub_billing_rate":        {"type": "money",            "required": False, "description": "Sub billing rate to client"},
-            "jdas_avg_sub_cost_rate":           {"type": "money",            "required": False, "description": "Sub cost rate (pay to sub)"},
-            # Pricing
-            "jdas_base_hourly_rate":            {"type": "money",            "required": True,  "description": "Base project hourly rate"},
-            "jdas_avg_hrs_per_project":         {"type": "decimal",          "required": False, "description": "Average project scope in hours"},
-            "jdas_base_win_rate":               {"type": "decimal",          "required": False, "description": "Baseline win rate 0-1"},
-            # Expenses
-            "jdas_fixed_monthly_expenses":      {"type": "money",            "required": True,  "description": "Fixed monthly overhead"},
-            "jdas_variable_monthly_expenses":   {"type": "money",            "required": False, "description": "Variable monthly costs"},
-            "jdas_owner_draw_monthly":          {"type": "money",            "required": True,  "description": "Owner monthly draw"},
-            "jdas_starting_cash":               {"type": "money",            "required": True,  "description": "Cash on hand at snapshot date"},
-            "jdas_tax_reserve_rate":            {"type": "decimal",          "required": False, "description": "Tax reserve rate (default 0.25)"},
-            # Leads
-            "jdas_base_leads_per_week":         {"type": "decimal",          "required": False, "description": "Base inbound leads per week"},
-            "jdas_marketing_multiplier":        {"type": "decimal",          "required": False, "description": "Marketing effort multiplier"},
-            # Recurring
-            "jdas_retainer_clients":            {"type": "integer",          "required": False, "description": "Current retainer client count"},
-            "jdas_avg_retainer_value":          {"type": "money",            "required": False, "description": "Avg retainer $/month"},
-            "jdas_monthly_churn_rate":          {"type": "decimal",          "required": False, "description": "Retainer monthly churn rate"},
-            # Customer behavior
-            "jdas_customer_sensitivity":        {"type": "nvarchar(20)",     "required": False, "description": "Low / Medium / High"},
-            "jdas_communication_quality":       {"type": "decimal",          "required": False, "description": "Communication quality 0-1"},
-            "jdas_process_discipline":          {"type": "decimal",          "required": False, "description": "Process discipline 0-1"},
+
+class ScenarioItem(BaseModel):
+    label: str = Field(..., description="Human-readable scenario name")
+    inputs: InputsPayload
+
+
+class StressTestPayload(BaseModel):
+    scenarios: List[ScenarioItem] = Field(..., min_items=1, max_items=10)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "scenarios": [
+                    {"label": "Current", "inputs": {}},
+                    {"label": "Hire 1 Sub", "inputs": {"num_subcontractors": 1}},
+                    {"label": "Raise Rate + Sub", "inputs": {"num_subcontractors": 1, "base_hourly_rate": 115.0}},
+                ]
+            }
         }
-    },
 
-    # ── PROJECTS: Active Projects (feeds Active Workload Engine) ──────────────
-    "jdas_active_projects": {
-        "display_name": "JDAS Active Projects",
-        "description": "Individual active projects tracked in the workload engine. "
-                       "Mirrors the Active_Projects sheet in JDAS_Active_Workload_Engine_v1.xlsx.",
-        "primary_key": "jdas_projectid",
-        "columns": {
-            "jdas_projectid":           {"type": "uniqueidentifier", "required": True},
-            "jdas_project_code":        {"type": "nvarchar(50)",     "required": True,  "description": "e.g. P-001"},
-            "jdas_client_name":         {"type": "nvarchar(200)",    "required": True,  "description": "Client name"},
-            "jdas_project_name":        {"type": "nvarchar(300)",    "required": False, "description": "Project description"},
-            "jdas_status":              {"type": "nvarchar(50)",     "required": True,  "description": "Active / On Hold / Completed"},
-            "jdas_hours_remaining":     {"type": "decimal",          "required": True,  "description": "Hours of work remaining"},
-            "jdas_hours_original":      {"type": "decimal",          "required": False, "description": "Original scoped hours"},
-            "jdas_start_date":          {"type": "datetime",         "required": False},
-            "jdas_target_end_date":     {"type": "datetime",         "required": False},
-            "jdas_billing_rate":        {"type": "money",            "required": False, "description": "Project-specific rate if different from default"},
-            "jdas_is_retainer":         {"type": "boolean",          "required": False, "description": "Is this a retainer project?"},
-        }
-    },
 
-    # ── WEEKLY LOG: For trend tracking ───────────────────────────────────────
-    "jdas_weekly_log": {
-        "display_name": "JDAS Weekly Log",
-        "description": "Owner-entered weekly actuals. Used to calibrate predictions vs reality.",
-        "primary_key": "jdas_logid",
-        "columns": {
-            "jdas_logid":               {"type": "uniqueidentifier", "required": True},
-            "jdas_week_start":          {"type": "datetime",         "required": True},
-            "jdas_actual_cash":         {"type": "money",            "required": False, "description": "Actual cash on hand this week"},
-            "jdas_actual_leads":        {"type": "decimal",          "required": False, "description": "Actual leads received"},
-            "jdas_actual_closes":       {"type": "integer",          "required": False, "description": "Jobs won this week"},
-            "jdas_actual_hrs_worked":   {"type": "decimal",          "required": False, "description": "Hours actually worked"},
-            "jdas_actual_invoiced":     {"type": "money",            "required": False, "description": "Amount invoiced this week"},
-            "jdas_actual_collected":    {"type": "money",            "required": False, "description": "Cash actually collected"},
-            "jdas_owner_notes":         {"type": "nvarchar(2000)",   "required": False, "description": "Free-form owner notes"},
-        }
-    },
-}
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-# ─── RELATIONSHIPS ────────────────────────────────────────────────────────────
+def merge_inputs(base: BusinessInputs, overrides: InputsPayload) -> BusinessInputs:
+    """Apply only the fields present in the payload onto the base inputs."""
+    import dataclasses
+    base_dict = dataclasses.asdict(base)
+    override_dict = {k: v for k, v in overrides.dict().items() if v is not None}
+    base_dict.update(override_dict)
+    return BusinessInputs(**base_dict)
 
-RELATIONSHIPS = [
-    {
-        "from_table": "jdas_business_snapshot",
-        "from_column": "jdas_inputsid_ref",
-        "to_table": "jdas_business_inputs",
-        "to_column": "jdas_inputsid",
-        "type": "many-to-one",
-        "description": "Each snapshot links to the inputs that generated it",
-    },
-    {
-        "from_table": "jdas_active_projects",
-        "from_column": "jdas_inputsid_ref",
-        "to_table": "jdas_business_inputs",
-        "to_column": "jdas_inputsid",
-        "type": "many-to-one",
-        "description": "Projects belong to a business inputs configuration",
-    },
-    {
-        "from_table": "jdas_weekly_log",
-        "from_column": "jdas_snapshotid_ref",
-        "to_table": "jdas_business_snapshot",
-        "to_column": "jdas_snapshotid",
-        "type": "many-to-one",
-        "description": "Weekly log entries link to the snapshot for that week",
-    },
-]
 
-# ─── DATAVERSE WEB API HELPERS (Python) ───────────────────────────────────────
-# Paste your Dataverse environment URL and use MSAL for auth.
-# See: https://docs.microsoft.com/en-us/power-apps/developer/data-platform/webapi/
-
-DATAVERSE_CONFIG = {
-    "environment_url": "https://YOUR_ORG.crm.dynamics.com",
-    "api_version": "v9.2",
-    "base_url": "https://YOUR_ORG.crm.dynamics.com/api/data/v9.2/",
-    "auth": {
-        "tenant_id": "YOUR_TENANT_ID",
-        "client_id": "YOUR_APP_CLIENT_ID",
-        "client_secret": "YOUR_APP_CLIENT_SECRET",  # Use Key Vault in production
-        "scope": "https://YOUR_ORG.crm.dynamics.com/.default",
+def build_dashboard_package(inputs: BusinessInputs, outputs: dict, label: str = "live") -> dict:
+    """Shape engine outputs into the dashboard-ready structure."""
+    weekly_in = outputs["exp_cash_received_12w"] / 12
+    weekly_out = outputs["exp_weekly_burn"]
+    return {
+        "meta": {
+            "label": label,
+            "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "week_of": datetime.date.today().isoformat(),
+        },
+        "score": {
+            "xp": outputs["xp_score"],
+            "level": outputs["xp_level"],
+            "title": outputs["xp_title"],
+        },
+        "status_banner": {
+            "headline": outputs["status_headline"],
+            "issues": outputs["status_issues"],
+            "wins": outputs["status_wins"],
+        },
+        "cash": {
+            "amount": inputs.starting_cash,
+            "weekly_out": round(weekly_out, 2),
+            "weekly_in": round(weekly_in, 2),
+            "weeks_left": outputs["exp_survival_runway_months"] * 4.33,
+            "net_12w": outputs["exp_net_cash_12w"],
+            "ending_cash": outputs["exp_ending_cash"],
+            "status": outputs["exp_cash_health_status"],
+            "tax_reserve_12w": outputs["exp_tax_reserve_12w"],
+        },
+        "workload": {
+            "active_hrs": outputs["exp_active_workload_hrs"],
+            "sustainable_cap": outputs["exp_sustainable_capacity_wk"],
+            "backlog_hrs": outputs["exp_backlog_hrs"],
+            "wait_days": outputs["exp_delay_days"],
+            "stress_score": outputs["exp_capacity_stress_score"],
+            "status": outputs["exp_workload_status"],
+            "hire_trigger": outputs["exp_hire_trigger_flag"],
+        },
+        "pipeline": {
+            "leads_per_week": outputs["exp_total_leads_per_week"],
+            "qualified_per_week": outputs["exp_qualified_leads_per_week"],
+            "proposals_12w": outputs["exp_proposals_12w"],
+            "closes_12w": outputs["exp_closed_12w_expected"],
+            "win_rate": outputs["exp_effective_win_rate"],
+            "avg_project_value": outputs["exp_avg_project_value"],
+            "revenue_12w": outputs["exp_total_invoiced_12w"],
+            "cash_collected_12w": outputs["exp_cash_received_12w"],
+        },
+        "quality": {
+            "score": outputs["exp_service_quality_score"],
+            "label": outputs["exp_quality_label"],
+            "risk": outputs["exp_quality_risk"],
+            "rework_rate": outputs["exp_rework_rate"],
+            "retention_likelihood": outputs["exp_retention_likelihood"],
+            "referral_likelihood": outputs["exp_referral_likelihood"],
+            "churn_risk": outputs["exp_churn_risk"],
+            "reaction_score": outputs["exp_reaction_score"],
+        },
+        "recurring": {
+            "mrr": outputs["exp_current_mrr"],
+            "mrr_month12": outputs["exp_mrr_month12"],
+            "stability_score": outputs["exp_mrr_stability_score"],
+            "retainer_clients": outputs["exp_retainer_clients"],
+            "coverage_pct": outputs["exp_mrr_coverage_expenses"],
+            "churn_flag": outputs["exp_churn_risk_flag"],
+        },
+        "labor": {
+            "team_capacity_wk": outputs["exp_team_capacity_per_week"],
+            "labor_cost_monthly": outputs["exp_labor_cost_monthly"],
+            "gross_margin": outputs["exp_gross_labor_margin"],
+            "sub_markup": outputs["exp_sub_markup_margin"],
+            "num_subs": inputs.num_subcontractors,
+        },
+        "raw_exports": outputs,
     }
-}
 
-DATAVERSE_ENDPOINTS = {
-    "snapshot_list":    "jdas_business_snapshots",
-    "inputs_list":      "jdas_business_inputses",
-    "projects_list":    "jdas_active_projectses",
-    "weekly_log_list":  "jdas_weekly_logs",
-}
+
+# ─── ENDPOINTS ────────────────────────────────────────────────────────────────
+
+@app.get("/", tags=["Health"])
+async def root():
+    return {
+        "service": "JDAS Digital Clone API",
+        "company": "JD Analytics & Solutions LLC",
+        "status": "online",
+        "version": "1.0.0",
+        "docs": "/docs",
+    }
+
+
+@app.get("/snapshot", tags=["Dashboard"])
+async def snapshot():
+    """
+    Returns the current live business state.
+    In production, inputs are pulled from Dataverse.
+    Read-only — reflects real business data, not a simulation.
+    """
+    try:
+        outputs = run_all(LIVE_INPUTS)
+        return build_dashboard_package(LIVE_INPUTS, to_dict(outputs), label="live")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict", tags=["Prediction"])
+async def predict(payload: InputsPayload):
+    """
+    Run the full engine chain with custom inputs layered on top of live data.
+    Used by the Predictive Playground — sliders post here, UI renders the delta.
+    Returns both the predicted outputs AND the live baseline for diff display.
+    """
+    try:
+        predicted_inputs = merge_inputs(LIVE_INPUTS, payload)
+        live_outputs = run_all(LIVE_INPUTS)
+        pred_outputs = run_all(predicted_inputs)
+        live_pkg = build_dashboard_package(LIVE_INPUTS, to_dict(live_outputs), label="live")
+        pred_pkg = build_dashboard_package(predicted_inputs, to_dict(pred_outputs), label="predicted")
+        # Compute top-level deltas for the impact strip
+        deltas = {
+            "cash_net_12w":      round(pred_pkg["cash"]["net_12w"] - live_pkg["cash"]["net_12w"], 2),
+            "revenue_12w":       round(pred_pkg["pipeline"]["revenue_12w"] - live_pkg["pipeline"]["revenue_12w"], 2),
+            "backlog_hrs":       round(pred_pkg["workload"]["backlog_hrs"] - live_pkg["workload"]["backlog_hrs"], 2),
+            "quality_score":     round(pred_pkg["quality"]["score"] - live_pkg["quality"]["score"], 2),
+            "xp_score":          pred_pkg["score"]["xp"] - live_pkg["score"]["xp"],
+            "win_rate":          round(pred_pkg["pipeline"]["win_rate"] - live_pkg["pipeline"]["win_rate"], 4),
+            "mrr":               round(pred_pkg["recurring"]["mrr"] - live_pkg["recurring"]["mrr"], 2),
+        }
+        return {
+            "live": live_pkg,
+            "predicted": pred_pkg,
+            "deltas": deltas,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/stress-test", tags=["Prediction"])
+async def stress_test(payload: StressTestPayload):
+    """
+    Run multiple named scenarios simultaneously and return a side-by-side comparison.
+    Useful for comparing 'What if I hired AND raised my rate' vs each individually.
+    Max 10 scenarios per call.
+    """
+    try:
+        results = []
+        for scenario in payload.scenarios:
+            inputs = merge_inputs(LIVE_INPUTS, scenario.inputs)
+            outputs = run_all(inputs)
+            pkg = build_dashboard_package(inputs, to_dict(outputs), label=scenario.label)
+            results.append({
+                "label": scenario.label,
+                "summary": {
+                    "xp": pkg["score"]["xp"],
+                    "title": pkg["score"]["title"],
+                    "cash_net_12w": pkg["cash"]["net_12w"],
+                    "ending_cash": pkg["cash"]["ending_cash"],
+                    "cash_status": pkg["cash"]["status"],
+                    "backlog_hrs": pkg["workload"]["backlog_hrs"],
+                    "wait_days": pkg["workload"]["wait_days"],
+                    "win_rate": pkg["pipeline"]["win_rate"],
+                    "revenue_12w": pkg["pipeline"]["revenue_12w"],
+                    "quality_score": pkg["quality"]["score"],
+                    "mrr": pkg["recurring"]["mrr"],
+                },
+                "full": pkg,
+            })
+        return {
+            "scenarios": results,
+            "best_xp": max(results, key=lambda r: r["summary"]["xp"])["label"],
+            "best_cash": max(results, key=lambda r: r["summary"]["ending_cash"])["label"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/dashboard", tags=["Dashboard"])
+async def dashboard():
+    """
+    Full dashboard data package — includes live state, XP, badges eligibility,
+    status banner, and all KPI cards. This is the primary endpoint for the React dashboard.
+    """
+    try:
+        outputs = run_all(LIVE_INPUTS)
+        pkg = build_dashboard_package(LIVE_INPUTS, to_dict(outputs), label="live")
+        # Compute badge eligibility
+        o = to_dict(outputs)
+        weekly_in = o["exp_cash_received_12w"] / 12
+        pkg["badges"] = {
+            "cash_pos":   weekly_in > o["exp_weekly_burn"],
+            "regular":    LIVE_INPUTS.current_retainer_clients >= 1,
+            "helper":     LIVE_INPUTS.num_subcontractors >= 1,
+            "happy":      o["exp_service_quality_score"] >= 80,
+            "breathing":  o["exp_capacity_stress_score"] < 40,
+            "pipeline":   o["exp_closed_12w_expected"] >= 12,
+            "steady":     o["exp_current_mrr"] >= o["exp_weekly_burn"] * 4 * 0.5,
+            "legend":     o["xp_score"] >= 90,
+        }
+        return pkg
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/update-inputs", tags=["Data"])
+async def update_inputs(payload: InputsPayload):
+    """
+    Accepts new business input values and persists them.
+    In production: writes to Microsoft Dataverse via Power Automate or direct SDK.
+    In development: returns the merged inputs + a fresh engine run.
+    """
+    try:
+        updated = merge_inputs(LIVE_INPUTS, payload)
+        outputs = run_all(updated)
+        return {
+            "status": "accepted",
+            "message": "Inputs received. In production these write to Dataverse.",
+            "applied_inputs": {
+                k: v for k, v in updated.__dict__.items()
+                if k in payload.dict() and payload.dict()[k] is not None
+            },
+            "snapshot": build_dashboard_package(updated, to_dict(outputs), label="updated"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
