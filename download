@@ -1,0 +1,4 @@
+DATAVERSE_TENANT_ID=your-azure-tenant-id
+DATAVERSE_CLIENT_ID=your-app-registration-client-id
+DATAVERSE_CLIENT_SECRET=your-client-secret
+DATAVERSE_ORG_URL=https://your-org.crm.dynamics.com
