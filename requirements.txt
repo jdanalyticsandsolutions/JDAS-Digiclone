@@ -1,6 +1,6 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-pydantic==2.6.4
-msal==1.28.0
-requests==2.31.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.7.0
+msal==1.29.0
+requests==2.32.3
 python-dotenv==1.0.1
