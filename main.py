@@ -43,11 +43,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── LIVE INPUTS — default baseline ──────────────────────────────────────────
-# In production this is pulled from Dataverse on each request.
-# This hardcoded baseline is only used if Dataverse has no saved inputs yet.
+# ─── LIVE INPUTS — mutable in-memory state ────────────────────────────────────────────
+# DEFAULT_INPUTS is the factory baseline used when no saved state exists yet.
+# LIVE_INPUTS is the working copy — replaced in-memory by /update-inputs on each
+# wizard save so /dashboard immediately reflects the new numbers.
+# Resets on Render redeploy until Dataverse read/write is wired in (Phase 3).
 
-LIVE_INPUTS = BusinessInputs(
+DEFAULT_INPUTS = BusinessInputs(
     base_leads_per_week=2.0,
     marketing_multiplier=1.0,
     active_workload_hrs=47.0,
@@ -70,6 +72,8 @@ LIVE_INPUTS = BusinessInputs(
     avg_retainer_value_monthly=800.0,
     current_month=3,
 )
+
+LIVE_INPUTS = DEFAULT_INPUTS  # replaced in-memory on each wizard save
 
 
 # ─── PYDANTIC MODELS ──────────────────────────────────────────────────────────
@@ -360,23 +364,22 @@ async def dashboard():
 @app.post("/update-inputs", tags=["Data"])
 async def update_inputs(payload: InputsPayload):
     """
-    Accepts new business input values from the weekly wizard and persists them.
-    In production: writes to Microsoft Dataverse.
-    Currently: merges onto baseline, runs engine, returns fresh snapshot.
-    The `projects` list is accepted and stored but not used by the engine directly.
+    Accepts new business input values from the weekly wizard.
+    Merges onto the current LIVE_INPUTS, replaces LIVE_INPUTS in-memory so
+    that /dashboard immediately reflects the new numbers on the next load.
+    In production (Phase 3): will also write to Dataverse for persistence
+    across Render restarts.
     """
+    global LIVE_INPUTS
     try:
         updated = merge_inputs(LIVE_INPUTS, payload)
+        LIVE_INPUTS = updated  # <-- this is the key line: dashboard now sees new numbers
         outputs = run_all(updated)
         pkg     = build_dashboard_package(updated, to_dict(outputs), label="updated")
         pkg["badges"] = badge_eligibility(updated, to_dict(outputs))
         return {
             "status":  "accepted",
-            "message": "Inputs received and engine recalculated.",
-            "applied_inputs": {
-                k: v for k, v in updated.__dict__.items()
-                if k in (payload.dict() or {}) and payload.dict().get(k) is not None
-            },
+            "message": "Inputs saved. Dashboard will reflect new numbers on next load.",
             "snapshot": pkg,
         }
     except Exception as e:
