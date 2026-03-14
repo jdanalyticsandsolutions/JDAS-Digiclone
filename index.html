@@ -16,8 +16,8 @@
     body { background: #f4ede4; font-family: 'DM Sans', system-ui, sans-serif; }
     input[type=range] { -webkit-appearance: none; height: 6px; border-radius: 3px; background: #e8ddd0; outline: none; width: 100%; }
     input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 19px; height: 19px; border-radius: 50%; background: #1c2b1e; cursor: pointer; border: 3px solid #52b788; box-shadow: 0 2px 6px rgba(40,20,8,0.16); }
-    ::-webkit-scrollbar { width: 6px; } 
-    ::-webkit-scrollbar-track { background: #e8ddd0; } 
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #e8ddd0; }
     ::-webkit-scrollbar-thumb { background: #b8a48e; border-radius: 3px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes toastIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
@@ -26,11 +26,12 @@
 </head>
 <body>
   <div id="root"></div>
-
   <script type="text/babel">
     const { useState, useEffect, useCallback, useRef } = React;
 
-    /* ── CONFIG ── */
+    /* ═══════════════════════════════════════════════════════════════
+       CONFIG
+    ═══════════════════════════════════════════════════════════════ */
     const API_BASE = "https://jdas-digiclone-1.onrender.com";
 
     async function apiFetch(endpoint, options = {}) {
@@ -45,7 +46,52 @@
       return res.json();
     }
 
-    /* ── TOKENS ── */
+    /* ═══════════════════════════════════════════════════════════════
+       LOCALSTORAGE BACKUP — persists data through Render spin-downs
+    ═══════════════════════════════════════════════════════════════ */
+    const LS_PAYLOAD_KEY  = "jdas_dashboard_payload";
+    const LS_SNAPSHOT_KEY = "jdas_dashboard_snapshot";
+
+    function backupPayload(payload) {
+      try {
+        localStorage.setItem(LS_PAYLOAD_KEY, JSON.stringify({
+          payload,
+          savedAt: new Date().toISOString(),
+        }));
+      } catch(e) { console.warn("JDAS: local payload backup failed", e); }
+    }
+
+    function backupSnapshot(snapshot) {
+      try {
+        localStorage.setItem(LS_SNAPSHOT_KEY, JSON.stringify({
+          snapshot,
+          savedAt: new Date().toISOString(),
+        }));
+      } catch(e) { console.warn("JDAS: local snapshot backup failed", e); }
+    }
+
+    function loadLocalPayload() {
+      try {
+        const raw = localStorage.getItem(LS_PAYLOAD_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch(e) { return null; }
+    }
+
+    function loadLocalSnapshot() {
+      try {
+        const raw = localStorage.getItem(LS_SNAPSHOT_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch(e) { return null; }
+    }
+
+    function isEmptyDashboard(res) {
+      return !res ||
+        (!res.cash?.amount && !res.pipeline?.revenue_12w && !res.score?.xp);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       DESIGN TOKENS
+    ═══════════════════════════════════════════════════════════════ */
     const T = {
       bg:"#f4ede4", bgSub:"#ede4d8", bgCard:"#faf7f3", bgDeep:"#e8ddd0",
       bgDark:"#1c2b1e", bgDarkMid:"#243228",
@@ -58,7 +104,9 @@
       white:"#fffcf8", shadow:"rgba(40,20,8,0.10)", shadowMd:"rgba(40,20,8,0.16)", shadowLg:"rgba(40,20,8,0.26)",
     };
 
-    /* ── STATUS HELPERS ── */
+    /* ═══════════════════════════════════════════════════════════════
+       STATUS HELPERS
+    ═══════════════════════════════════════════════════════════════ */
     const statusColor = s => s==="bad"||s==="NEGATIVE CASH"||s==="OVERLOADED"||s==="High"||s==="critical"?T.red:s==="warn"||s==="LOW"||s==="TIGHT"||s==="Medium"?T.gold:T.green;
     const statusPale  = s => s==="bad"||s==="NEGATIVE CASH"||s==="OVERLOADED"||s==="High"||s==="critical"?T.redPale:s==="warn"||s==="LOW"||s==="TIGHT"||s==="Medium"?T.goldPale:T.greenPale;
     const cashStatus  = d => d?.cash?.status==="NEGATIVE CASH"||d?.cash?.status==="CRITICAL"?"bad":d?.cash?.status==="LOW"?"warn":"good";
@@ -85,7 +133,9 @@
       {id:"legend",   icon:"🏆",name:"Business Legend", desc:"Business score hit 90"},
     ];
 
-    /* ── PRIMITIVES ── */
+    /* ═══════════════════════════════════════════════════════════════
+       PRIMITIVES
+    ═══════════════════════════════════════════════════════════════ */
     function HealthBar({val,max=100,invert=false,size="md"}) {
       const pct=Math.min(100,Math.max(0,(val/max)*100));
       const eff=invert?100-pct:pct;
@@ -213,13 +263,33 @@
       );
     }
 
-    /* ── WIZARD ── */
+    /* ═══════════════════════════════════════════════════════════════
+       RESTORE TOAST — shown when data is recovered from local backup
+    ═══════════════════════════════════════════════════════════════ */
+    function RestoreToast({savedAt,onDone}) {
+      useEffect(()=>{const t=setTimeout(onDone,5000);return()=>clearTimeout(t);},[]);
+      const when = savedAt ? new Date(savedAt).toLocaleString() : "last session";
+      return (
+        <div style={{position:"fixed",top:82,right:24,zIndex:500,background:T.bgDark,color:T.white,borderRadius:18,padding:"14px 22px",boxShadow:`0 14px 40px ${T.shadowLg}`,border:`1.5px solid ${T.greenGlow}66`,display:"flex",alignItems:"center",gap:14,animation:"toastIn 0.38s cubic-bezier(0.34,1.56,0.64,1) forwards",maxWidth:340}}>
+          <div style={{fontSize:30}}>🔄</div>
+          <div>
+            <div style={{fontSize:11,color:T.greenLight,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:3}}>Data Restored</div>
+            <div style={{fontSize:13,fontWeight:700}}>Recovered from local backup</div>
+            <div style={{fontSize:11,color:"#9ab09e",marginTop:2}}>Last saved: {when}</div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       WIZARD
+    ═══════════════════════════════════════════════════════════════ */
     const WIZARD_STEPS=[
-      {id:"cash",    icon:"💵",title:"Money",         subtitle:"Cash on hand + monthly expenses"},
-      {id:"projects",icon:"📋",title:"Active Work",   subtitle:"Projects + hours remaining"},
-      {id:"team",    icon:"👷",title:"Your Team",     subtitle:"Capacity, rate, helpers"},
+      {id:"cash",    icon:"💵",title:"Money",          subtitle:"Cash on hand + monthly expenses"},
+      {id:"projects",icon:"📋",title:"Active Work",    subtitle:"Projects + hours remaining"},
+      {id:"team",    icon:"👷",title:"Your Team",      subtitle:"Capacity, rate, helpers"},
       {id:"leads",   icon:"📣",title:"Leads & Clients",subtitle:"New enquiries + regular clients"},
-      {id:"review",  icon:"✅",title:"Review & Save", subtitle:"Confirm and push to dashboard"},
+      {id:"review",  icon:"✅",title:"Review & Save",  subtitle:"Confirm and push to dashboard"},
     ];
 
     function WizardInput({prefix,suffix,type="number",placeholder,value,onChange}) {
@@ -342,7 +412,7 @@
       );
     }
 
-    function StepReview({formData,projects,isSaving,saveResult,saveError}) {
+    function StepReview({formData,projects,isSaving,saveResult,saveError,wasRestored}) {
       const active=projects.filter(p=>p.status!=="Completed");
       const totalHrs=active.reduce((s,p)=>s+(p.hrs_remaining||0),0);
       const totalMrr=(formData.current_retainer_clients||0)*(formData.avg_retainer_value_monthly||0);
@@ -360,8 +430,13 @@
       ];
       return (
         <div style={{display:"flex",flexDirection:"column",gap:13}}>
-          {saveResult==="success"&&<div style={{background:T.greenPale,border:`2px solid ${T.green}44`,borderRadius:12,padding:"14px 18px",fontSize:13,color:T.green,fontWeight:700}}>✅ Saved to Dataverse. Dashboard is refreshing…</div>}
-          {saveResult==="error"&&<div style={{background:T.redPale,border:`2px solid ${T.red}44`,borderRadius:12,padding:"13px 17px",fontSize:13,color:T.red,fontWeight:700}}>⚠️ Save failed: {saveError||"Unknown error"}. Check your Dataverse connection and try again.</div>}
+          {wasRestored&&saveResult!=="success"&&(
+            <div style={{background:T.greenPale,border:`2px solid ${T.green}44`,borderRadius:12,padding:"12px 16px",fontSize:12,color:T.green,fontWeight:600,display:"flex",gap:8,alignItems:"center"}}>
+              🔄 These numbers were restored from your local backup. Review and save to push them back to the dashboard.
+            </div>
+          )}
+          {saveResult==="success"&&<div style={{background:T.greenPale,border:`2px solid ${T.green}44`,borderRadius:12,padding:"14px 18px",fontSize:13,color:T.green,fontWeight:700}}>✅ Saved to Dataverse + local backup. Dashboard is refreshing…</div>}
+          {saveResult==="error"&&<div style={{background:T.redPale,border:`2px solid ${T.red}44`,borderRadius:12,padding:"13px 17px",fontSize:13,color:T.red,fontWeight:700}}>⚠️ Save failed: {saveError||"Unknown error"}. Check your connection and try again.</div>}
           <div style={{fontSize:13,color:T.textSoft,lineHeight:1.6}}>Review what you entered. Go back to fix anything before saving.</div>
           {rows.map(({label,val})=>(
             <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 15px",background:T.bgCard,borderRadius:10,border:`1px solid ${T.border}`}}>
@@ -369,18 +444,40 @@
               <span style={{fontSize:14,fontWeight:800,color:T.textDark,fontFamily:"'Playfair Display',serif"}}>{val}</span>
             </div>
           ))}
-          {isSaving&&<div style={{display:"flex",alignItems:"center",gap:13,padding:"12px 16px",background:T.bgDeep,borderRadius:10}}><Spinner size={28}/><span style={{fontSize:13,color:T.textMid,fontWeight:600}}>Saving to Dataverse…</span></div>}
+          {isSaving&&<div style={{display:"flex",alignItems:"center",gap:13,padding:"12px 16px",background:T.bgDeep,borderRadius:10}}><Spinner size={28}/><span style={{fontSize:13,color:T.textMid,fontWeight:600}}>Saving to Dataverse + local backup…</span></div>}
         </div>
       );
     }
 
-    function WeeklyWizard({onClose,onSaved}) {
+    function WeeklyWizard({onClose,onSaved,restoredPayload}) {
       const [step,setStep]=useState(0);
       const [isSaving,setIsSaving]=useState(false);
       const [saveResult,setSaveResult]=useState(null);
       const [saveError,setSaveError]=useState(null);
-      const [formData,setFormData]=useState({starting_cash:0,owner_draw_monthly:0,fixed_monthly_expenses:0,variable_monthly_expenses:0,owner_total_hours_week:0,admin_hours_week:0,base_hourly_rate:0,num_subcontractors:0,base_leads_per_week:0,current_retainer_clients:0,avg_retainer_value_monthly:0,current_month:new Date().getMonth()+1});
-      const [projects,setProjects]=useState([]);
+
+      const defaultForm = {
+        starting_cash:0,owner_draw_monthly:0,fixed_monthly_expenses:0,
+        variable_monthly_expenses:0,owner_total_hours_week:0,admin_hours_week:0,
+        base_hourly_rate:0,num_subcontractors:0,base_leads_per_week:0,
+        current_retainer_clients:0,avg_retainer_value_monthly:0,
+        current_month:new Date().getMonth()+1,
+      };
+
+      // Pre-fill from restored payload if available
+      const [formData,setFormData]=useState(()=>{
+        if(restoredPayload) {
+          const {projects:_p, active_workload_hrs:_a, num_active_projects:_n, ...rest} = restoredPayload;
+          return {...defaultForm, ...rest};
+        }
+        return defaultForm;
+      });
+
+      const [projects,setProjects]=useState(()=>{
+        if(restoredPayload?.projects) return restoredPayload.projects;
+        return [];
+      });
+
+      const wasRestored = !!restoredPayload;
 
       const updateField=useCallback((k,v)=>setFormData(d=>({...d,[k]:v})),[]);
       const updateProject=useCallback((id,k,v)=>setProjects(ps=>ps.map(p=>p.id===id?{...p,[k]:v}:p)),[]);
@@ -391,11 +488,27 @@
         setIsSaving(true);setSaveResult(null);setSaveError(null);
         try {
           const activeHrs=projects.filter(p=>p.status!=="Completed").reduce((s,p)=>s+(p.hrs_remaining||0),0);
-          await apiFetch("/update-inputs",{method:"POST",body:JSON.stringify({...formData,active_workload_hrs:activeHrs,num_active_projects:projects.filter(p=>p.status!=="Completed").length,projects})});
+          const payload={
+            ...formData,
+            active_workload_hrs:activeHrs,
+            num_active_projects:projects.filter(p=>p.status!=="Completed").length,
+            projects,
+          };
+
+          // ── Save to Render API ──
+          await apiFetch("/update-inputs",{method:"POST",body:JSON.stringify(payload)});
+
+          // ── Mirror to localStorage backup ──
+          backupPayload(payload);
+
           setSaveResult("success");
           setTimeout(()=>onSaved(),1800);
-        } catch(e){setSaveResult("error");setSaveError(e.message);}
-        finally{setIsSaving(false);}
+        } catch(e){
+          setSaveResult("error");
+          setSaveError(e.message);
+        } finally{
+          setIsSaving(false);
+        }
       };
 
       return (
@@ -433,7 +546,7 @@
               {step===1&&<StepProjects projects={projects} onUpdate={updateProject} onAdd={addProject} onRemove={removeProject}/>}
               {step===2&&<StepTeam data={formData} onChange={updateField}/>}
               {step===3&&<StepLeads data={formData} onChange={updateField}/>}
-              {step===4&&<StepReview formData={formData} projects={projects} isSaving={isSaving} saveResult={saveResult} saveError={saveError}/>}
+              {step===4&&<StepReview formData={formData} projects={projects} isSaving={isSaving} saveResult={saveResult} saveError={saveError} wasRestored={wasRestored}/>}
             </div>
             <div style={{padding:"14px 26px",borderTop:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0,background:T.bg}}>
               <button onClick={()=>step>0&&setStep(s=>s-1)} disabled={step===0} style={{padding:"10px 22px",borderRadius:10,border:`1.5px solid ${T.border}`,background:"transparent",color:step===0?T.textLight:T.textMid,fontSize:13,fontWeight:700,cursor:step===0?"default":"pointer",fontFamily:"inherit",opacity:step===0?0.35:1}}>← Back</button>
@@ -448,7 +561,9 @@
       );
     }
 
-    /* ── SNAPSHOT ── */
+    /* ═══════════════════════════════════════════════════════════════
+       SNAPSHOT VIEW
+    ═══════════════════════════════════════════════════════════════ */
     function SnapshotView({data,onOpenWizard}) {
       const d=data;
       return (
@@ -564,7 +679,9 @@
       );
     }
 
-    /* ── PREDICTION PANEL ── */
+    /* ═══════════════════════════════════════════════════════════════
+       PREDICTION PANEL
+    ═══════════════════════════════════════════════════════════════ */
     function PredictionPanel({liveData}) {
       const [sliders,setSliders]=useState(null);
       const [pred,setPred]=useState(null);
@@ -572,7 +689,7 @@
       const debounceRef=useRef(null);
 
       useEffect(()=>{
-        if(liveData&&!sliders) {
+        if(liveData&&!sliders){
           setSliders({
             moreLeads:liveData.pipeline?.leads_per_week||0,
             raiseRate:liveData.pipeline?.avg_project_value?Math.round(liveData.pipeline.avg_project_value/15):0,
@@ -641,10 +758,10 @@
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
               {[
-                {icon:"💵",label:"Cash in the bank",  val:`$${(live?.cash?.amount||0).toLocaleString()}`,       col:cashStatus(live)==="bad"?T.redLight:T.greenLight},
-                {icon:"📋",label:"Work backed up",     val:`${live?.workload?.backlog_hrs||0} hrs`,              col:workStatus(live)==="bad"?T.redLight:T.goldLight},
-                {icon:"🔧",label:"Win rate",           val:`${Math.round((live?.pipeline?.win_rate||0)*100)}%`,  col:pipeStatus(live)==="bad"?T.redLight:T.goldLight},
-                {icon:"😊",label:"Customer happiness", val:`${live?.quality?.score||0} / 100`,                  col:qualStatus(live)==="bad"?T.redLight:T.greenLight},
+                {icon:"💵",label:"Cash in the bank",  val:`$${(live?.cash?.amount||0).toLocaleString()}`,      col:cashStatus(live)==="bad"?T.redLight:T.greenLight},
+                {icon:"📋",label:"Work backed up",     val:`${live?.workload?.backlog_hrs||0} hrs`,             col:workStatus(live)==="bad"?T.redLight:T.goldLight},
+                {icon:"🔧",label:"Win rate",           val:`${Math.round((live?.pipeline?.win_rate||0)*100)}%`, col:pipeStatus(live)==="bad"?T.redLight:T.goldLight},
+                {icon:"😊",label:"Customer happiness", val:`${live?.quality?.score||0} / 100`,                 col:qualStatus(live)==="bad"?T.redLight:T.greenLight},
               ].map(({icon,label,val,col})=>(
                 <div key={label} style={{background:"#1a2a1c",border:`1px solid ${T.borderDark}`,borderRadius:12,padding:"10px 14px"}}>
                   <div style={{fontSize:10,color:"#4a6a4e",marginBottom:4,fontWeight:600}}>{icon} {label}</div>
@@ -709,7 +826,9 @@
       );
     }
 
-    /* ── ROOT ── */
+    /* ═══════════════════════════════════════════════════════════════
+       ROOT APP
+    ═══════════════════════════════════════════════════════════════ */
     function App() {
       const [mode,setMode]=useState("snapshot");
       const [data,setData]=useState(null);
@@ -719,21 +838,74 @@
       const [pulse,setPulse]=useState(false);
       const [lastUpdated,setLastUpdated]=useState(null);
       const [newBadge,setNewBadge]=useState(null);
+      const [showRestoreToast,setShowRestoreToast]=useState(null); // savedAt string or null
+      const [restoredPayload,setRestoredPayload]=useState(null);   // payload to pre-fill wizard
       const prevBadges=useRef({});
+
+      const applyDashboardData = useCallback((res, badges) => {
+        if(res.badges && Object.keys(badges).length>0){
+          const fresh=ACHIEVEMENTS.filter(a=>res.badges[a.id]&&!badges[a.id]);
+          if(fresh.length) setNewBadge(fresh[0]);
+        }
+        prevBadges.current=res.badges||{};
+        setData(res);
+        setLastUpdated(new Date());
+        // Always cache a fresh snapshot locally
+        backupSnapshot(res);
+      }, []);
 
       const loadDashboard=useCallback(async()=>{
         setLoading(true);setError(null);
         try {
           const res=await apiFetch("/dashboard");
-          if(res.badges&&Object.keys(prevBadges.current).length>0){
-            const fresh=ACHIEVEMENTS.filter(a=>res.badges[a.id]&&!prevBadges.current[a.id]);
-            if(fresh.length) setNewBadge(fresh[0]);
+
+          // ── Spin-down recovery: API returned but data is empty ──
+          if(isEmptyDashboard(res)) {
+            const local = loadLocalPayload();
+            if(local?.payload) {
+              console.log("JDAS: API empty, restoring from local backup:", local.savedAt);
+              try {
+                await apiFetch("/update-inputs",{method:"POST",body:JSON.stringify(local.payload)});
+                const restored=await apiFetch("/dashboard");
+                applyDashboardData(restored, prevBadges.current);
+                setShowRestoreToast(local.savedAt);
+                setRestoredPayload(local.payload);
+              } catch(restoreErr) {
+                console.warn("JDAS: restore attempt failed:", restoreErr);
+                // Fall back to cached snapshot so user sees something
+                const snap = loadLocalSnapshot();
+                if(snap?.snapshot) {
+                  setData(snap.snapshot);
+                  setLastUpdated(new Date(snap.savedAt));
+                  setShowRestoreToast(snap.savedAt);
+                }
+              }
+            } else {
+              // Truly no data anywhere — show empty state
+              applyDashboardData(res, prevBadges.current);
+            }
+            return;
           }
-          prevBadges.current=res.badges||{};
-          setData(res);setLastUpdated(new Date());
-        } catch(e){setError(e.message);}
-        finally{setLoading(false);}
-      },[]);
+
+          // ── Normal path ──
+          applyDashboardData(res, prevBadges.current);
+
+        } catch(e) {
+          // ── Full API failure — try local snapshot ──
+          const snap = loadLocalSnapshot();
+          if(snap?.snapshot) {
+            console.log("JDAS: API unreachable, loading local snapshot from:", snap.savedAt);
+            setData(snap.snapshot);
+            setLastUpdated(new Date(snap.savedAt));
+            setShowRestoreToast(snap.savedAt);
+            setError(null); // Don't show error if we have cached data
+          } else {
+            setError(e.message);
+          }
+        } finally {
+          setLoading(false);
+        }
+      },[applyDashboardData]);
 
       useEffect(()=>{loadDashboard();},[]);
       useEffect(()=>{const t=setInterval(()=>setPulse(p=>!p),2400);return()=>clearInterval(t);},[]);
@@ -743,9 +915,14 @@
       return (
         <div style={{minHeight:"100vh",background:T.bg,fontFamily:"'DM Sans',system-ui,sans-serif",color:T.textDark}}>
           {newBadge&&<BadgeToast badge={newBadge} onDone={()=>setNewBadge(null)}/>}
-          {showWizard&&<WeeklyWizard onClose={()=>setShowWizard(false)} onSaved={()=>{setShowWizard(false);loadDashboard();}}/>}
+          {showRestoreToast&&<RestoreToast savedAt={showRestoreToast} onDone={()=>setShowRestoreToast(null)}/>}
+          {showWizard&&<WeeklyWizard
+            onClose={()=>setShowWizard(false)}
+            onSaved={()=>{setShowWizard(false);setRestoredPayload(null);loadDashboard();}}
+            restoredPayload={restoredPayload}
+          />}
 
-          {/* Header */}
+          {/* ── Header ── */}
           <div style={{background:T.bgDark,padding:"13px 28px",display:"flex",justifyContent:"space-between",alignItems:"center",boxShadow:`0 4px 24px ${T.shadowLg}`,position:"sticky",top:0,zIndex:100}}>
             <div style={{display:"flex",alignItems:"center",gap:14}}>
               <div style={{width:48,height:48,borderRadius:12,background:"#e8eef4",boxShadow:"0 4px 16px rgba(0,0,0,0.4)",border:"1.5px solid #3d5240",display:"flex",alignItems:"center",justifyContent:"center"}}>
@@ -795,7 +972,7 @@
       );
     }
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
+    const root=ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App/>);
   </script>
 </body>
