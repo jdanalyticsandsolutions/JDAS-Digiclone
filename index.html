@@ -84,9 +84,20 @@
       } catch(e) { return null; }
     }
 
+    // Default sentinel values matching main.py DEFAULT_INPUTS.
+    // If the API returns these exact numbers the backend woke up with factory
+    // defaults — treat as "needs restore" even though data isn't blank.
+    const DEFAULT_CASH  = 2100;
+    const DEFAULT_LEADS = 2.0;
+
     function isEmptyDashboard(res) {
-      return !res ||
-        (!res.cash?.amount && !res.pipeline?.revenue_12w && !res.score?.xp);
+      if (!res) return true;
+      // Truly blank
+      if (!res.cash?.amount && !res.pipeline?.revenue_12w && !res.score?.xp) return true;
+      // Factory defaults — backend woke up without saved data loaded
+      const cashIsDefault  = res.cash?.amount === DEFAULT_CASH;
+      const leadsIsDefault = res.pipeline?.leads_per_week === DEFAULT_LEADS;
+      return cashIsDefault && leadsIsDefault;
     }
 
     /* ═══════════════════════════════════════════════════════════════
