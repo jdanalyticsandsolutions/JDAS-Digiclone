@@ -3,13 +3,15 @@ JDAS Digital Clone — FastAPI Application
 =========================================
 Public-facing API endpoints for the JDAS Business Intelligence engine.
 
+Storage: PostgreSQL (Render) — persists through spin-downs, accessible from any device.
+
 Endpoints:
   GET  /                    Health check
   GET  /snapshot            Current business state (read-only)
   POST /predict             Run simulation with custom inputs
   POST /stress-test         Run multiple scenarios, return comparison
   GET  /dashboard           Full dashboard data package
-  POST /update-inputs       Persist new business inputs (Dataverse)
+  POST /update-inputs       Persist new business inputs to PostgreSQL
 """
 
 from fastapi import FastAPI, HTTPException
@@ -19,18 +21,12 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import logging
 import datetime
+import os
+import json
 
 logger = logging.getLogger(__name__)
 
 from engine import BusinessInputs, run_all, to_dict
-from dataverse_connector import (
-    load_business_inputs,
-    save_business_inputs,
-    save_projects,
-    save_snapshot,
-    dataverse_health_check,
-    JDAS_BUSINESS_ID,
-)
 
 # ─── APP SETUP ────────────────────────────────────────────────────────────────
 
@@ -38,7 +34,7 @@ app = FastAPI(
     title="JDAS Digital Clone API",
     description="Business intelligence engine for JD Analytics & Solutions LLC. "
                 "Powers the Digital Clone dashboard — snapshot, prediction, and stress-test endpoints.",
-    version="1.0.0",
+    version="2.0.0",
     contact={
         "name": "JD Analytics & Solutions LLC",
         "url": "https://www.jdanalyticsandsolutions.com",
@@ -48,17 +44,128 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Lock down to your domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── LIVE INPUTS — mutable in-memory state ────────────────────────────────────────────
-# DEFAULT_INPUTS is the factory baseline used when no saved state exists yet.
-# LIVE_INPUTS is the working copy — replaced in-memory by /update-inputs on each
-# wizard save so /dashboard immediately reflects the new numbers.
-# Resets on Render redeploy until Dataverse read/write is wired in (Phase 3).
+# ─── DATABASE SETUP ───────────────────────────────────────────────────────────
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://small_business_digital_clone_user:cbhs3isY9DoQdgoznCoVVKJBSwNH3WJF@dpg-d6qc2qnpm1nc73b06f10-a/small_business_digital_clone"
+)
+
+def get_db_connection():
+    """Return a psycopg2 connection."""
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    """
+    Create tables on startup if they don't exist.
+    - business_inputs: one row per business_id, stores wizard payload as JSON
+    - dashboard_snapshots: history of dashboard outputs (optional, for future use)
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS business_inputs (
+                    business_id TEXT PRIMARY KEY,
+                    inputs_json JSONB NOT NULL,
+                    projects_json JSONB,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS dashboard_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    business_id TEXT NOT NULL,
+                    snapshot_json JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+        conn.commit()
+        logger.info("JDAS: Database tables ready.")
+    except Exception as e:
+        logger.error(f"JDAS: DB init failed: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def load_inputs_from_db(business_id: str) -> Optional[dict]:
+    """Load saved business inputs from PostgreSQL. Returns None if not found."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT inputs_json, projects_json FROM business_inputs WHERE business_id = %s",
+                (business_id,)
+            )
+            row = cur.fetchone()
+            if row:
+                inputs = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                projects = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else [])
+                inputs["_projects"] = projects
+                return inputs
+            return None
+    except Exception as e:
+        logger.error(f"JDAS: DB load failed: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def save_inputs_to_db(business_id: str, inputs_dict: dict, projects: list):
+    """Save business inputs to PostgreSQL. Upserts on business_id."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO business_inputs (business_id, inputs_json, projects_json, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (business_id)
+                DO UPDATE SET
+                    inputs_json = EXCLUDED.inputs_json,
+                    projects_json = EXCLUDED.projects_json,
+                    updated_at = NOW();
+            """, (business_id, json.dumps(inputs_dict), json.dumps(projects)))
+        conn.commit()
+        logger.info(f"JDAS: Saved inputs for {business_id}")
+    except Exception as e:
+        logger.error(f"JDAS: DB save failed: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def save_snapshot_to_db(business_id: str, snapshot: dict):
+    """Save a dashboard snapshot row for historical tracking."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO dashboard_snapshots (business_id, snapshot_json)
+                VALUES (%s, %s);
+            """, (business_id, json.dumps(snapshot)))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"JDAS: Snapshot save failed (non-fatal): {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+# ─── BUSINESS ID ──────────────────────────────────────────────────────────────
+
+JDAS_BUSINESS_ID = "jdas-001"
+
+# ─── DEFAULT INPUTS ───────────────────────────────────────────────────────────
 
 DEFAULT_INPUTS = BusinessInputs(
     base_leads_per_week=2.0,
@@ -84,21 +191,16 @@ DEFAULT_INPUTS = BusinessInputs(
     current_month=3,
 )
 
-LIVE_INPUTS = DEFAULT_INPUTS  # replaced in-memory on each wizard save
+# In-memory cache — replaced on each successful DB read/write
+LIVE_INPUTS = DEFAULT_INPUTS
 
 
 # ─── PYDANTIC MODELS ──────────────────────────────────────────────────────────
 
 class InputsPayload(BaseModel):
-    """
-    Owner-editable business inputs for prediction / stress-test / update calls.
-    All fields are optional — only supplied fields are applied on top of the baseline.
-    Minimums are intentionally permissive (ge=0) so a fresh first entry never fails
-    validation. The engine handles zero-value edge cases internally.
-    """
-    base_leads_per_week:        Optional[float] = Field(None, ge=0, description="Average leads per week")
+    base_leads_per_week:        Optional[float] = Field(None, ge=0)
     marketing_multiplier:       Optional[float] = Field(None, ge=0, le=10.0)
-    active_workload_hrs:        Optional[float] = Field(None, ge=0, description="Hours on active projects")
+    active_workload_hrs:        Optional[float] = Field(None, ge=0)
     owner_total_hours_week:     Optional[float] = Field(None, ge=0, le=168)
     admin_hours_week:           Optional[float] = Field(None, ge=0)
     num_subcontractors:         Optional[int]   = Field(None, ge=0, le=50)
@@ -115,9 +217,7 @@ class InputsPayload(BaseModel):
     avg_retainer_value_monthly: Optional[float] = Field(None, ge=0)
     current_month:              Optional[int]   = Field(None, ge=1, le=12)
     num_active_projects:        Optional[int]   = Field(None, ge=0)
-
-    # Wizard-only fields — accepted and ignored gracefully if engine doesn't use them
-    projects: Optional[List[Dict[str, Any]]] = Field(None)
+    projects:                   Optional[List[Dict[str, Any]]] = Field(None)
 
     class Config:
         json_schema_extra = {
@@ -132,38 +232,20 @@ class InputsPayload(BaseModel):
 
 
 class ScenarioItem(BaseModel):
-    label: str = Field(..., description="Human-readable scenario name")
+    label:  str = Field(..., description="Human-readable scenario name")
     inputs: InputsPayload
 
 
 class StressTestPayload(BaseModel):
     scenarios: List[ScenarioItem] = Field(..., min_length=1, max_length=10)
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "scenarios": [
-                    {"label": "Current",         "inputs": {}},
-                    {"label": "Hire 1 Sub",       "inputs": {"num_subcontractors": 1}},
-                    {"label": "Raise Rate + Sub", "inputs": {"num_subcontractors": 1, "base_hourly_rate": 115.0}},
-                ]
-            }
-        }
-
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def merge_inputs(base: BusinessInputs, overrides: InputsPayload) -> BusinessInputs:
-    """
-    Apply submitted fields from the payload onto the base inputs.
-    Uses __fields_set__ to distinguish 'user sent 0' from 'user didn't send this field'.
-    This means billing_rate=0, cash=0, leads=0 etc. all apply correctly.
-    Wizard-only fields (e.g. projects) are silently skipped if not on BusinessInputs.
-    """
     import dataclasses
     base_dict     = dataclasses.asdict(base)
     engine_fields = set(base_dict.keys())
-    # __fields_set__ contains only keys the caller actually included in the payload
     override_dict = {
         k: v for k, v in overrides.dict().items()
         if k in overrides.__fields_set__ and k in engine_fields
@@ -173,7 +255,6 @@ def merge_inputs(base: BusinessInputs, overrides: InputsPayload) -> BusinessInpu
 
 
 def build_dashboard_package(inputs: BusinessInputs, outputs: dict, label: str = "live") -> dict:
-    """Shape engine outputs into the dashboard-ready structure."""
     weekly_in  = outputs["exp_cash_received_12w"] / 12
     weekly_out = outputs["exp_weekly_burn"]
     return {
@@ -251,7 +332,6 @@ def build_dashboard_package(inputs: BusinessInputs, outputs: dict, label: str = 
 
 
 def badge_eligibility(inputs: BusinessInputs, o: dict) -> dict:
-    """Compute badge unlock state from engine outputs."""
     weekly_in = o["exp_cash_received_12w"] / 12
     return {
         "cash_pos":  weekly_in >= o["exp_weekly_burn"],
@@ -269,47 +349,58 @@ def badge_eligibility(inputs: BusinessInputs, o: dict) -> dict:
 
 def get_live_inputs() -> BusinessInputs:
     """
-    Load the current business inputs.
-    Tries Dataverse first — falls back to in-memory LIVE_INPUTS if Dataverse
-    is unreachable or has no saved record yet.
+    Load current business inputs.
+    Priority: PostgreSQL → in-memory cache → DEFAULT_INPUTS
     """
     import dataclasses
     try:
-        saved = load_business_inputs(JDAS_BUSINESS_ID)
+        saved = load_inputs_from_db(JDAS_BUSINESS_ID)
         if saved:
-            # Merge saved Dataverse values onto DEFAULT_INPUTS so any missing
-            # fields get a safe default rather than crashing.
+            saved.pop("_projects", None)
             base = dataclasses.asdict(DEFAULT_INPUTS)
-            saved.pop("_record_id", None)
             base.update({k: v for k, v in saved.items() if k in base and v is not None})
             return BusinessInputs(**base)
     except Exception as e:
-        logger.warning(f"Dataverse read failed, using in-memory inputs: {e}")
+        logger.warning(f"JDAS: DB read failed, using in-memory: {e}")
     return LIVE_INPUTS
+
+
+# ─── STARTUP ──────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database tables on startup."""
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"JDAS: Startup DB init failed: {e}")
 
 
 # ─── ENDPOINTS ────────────────────────────────────────────────────────────────
 
 @app.get("/", tags=["Health"])
 async def root():
-    dv = dataverse_health_check()
+    db_ok = False
+    try:
+        conn = get_db_connection()
+        conn.close()
+        db_ok = True
+    except Exception:
+        pass
     return {
-        "service":    "JDAS Digital Clone API",
-        "company":    "JD Analytics & Solutions LLC",
-        "status":     "online",
-        "version":    "1.0.0",
-        "docs":       "/docs",
-        "dataverse":  "connected" if dv.get("connected") else "disconnected",
+        "service":  "JDAS Digital Clone API",
+        "company":  "JD Analytics & Solutions LLC",
+        "status":   "online",
+        "version":  "2.0.0",
+        "docs":     "/docs",
+        "database": "connected" if db_ok else "disconnected",
+        "storage":  "PostgreSQL (Render)",
     }
 
 
 @app.get("/snapshot", tags=["Dashboard"])
 async def snapshot():
-    """
-    Returns the current live business state.
-    In production, inputs are pulled from Dataverse.
-    Read-only — reflects real business data, not a simulation.
-    """
+    """Returns the current live business state from PostgreSQL."""
     try:
         inputs  = get_live_inputs()
         outputs = run_all(inputs)
@@ -322,14 +413,14 @@ async def snapshot():
 async def predict(payload: InputsPayload):
     """
     Run the full engine chain with custom inputs layered on top of live data.
-    Used by the Predictive Playground — sliders post here, UI renders the delta.
-    Returns both the predicted outputs AND the live baseline for diff display.
+    Used by the Predictive Playground sliders.
     """
     try:
-        predicted_inputs = merge_inputs(LIVE_INPUTS, payload)
-        live_outputs     = run_all(LIVE_INPUTS)
+        live_inputs      = get_live_inputs()
+        predicted_inputs = merge_inputs(live_inputs, payload)
+        live_outputs     = run_all(live_inputs)
         pred_outputs     = run_all(predicted_inputs)
-        live_pkg         = build_dashboard_package(LIVE_INPUTS,      to_dict(live_outputs), label="live")
+        live_pkg         = build_dashboard_package(live_inputs,      to_dict(live_outputs), label="live")
         pred_pkg         = build_dashboard_package(predicted_inputs, to_dict(pred_outputs), label="predicted")
         deltas = {
             "cash_net_12w":  round(pred_pkg["cash"]["net_12w"]         - live_pkg["cash"]["net_12w"],        2),
@@ -347,14 +438,12 @@ async def predict(payload: InputsPayload):
 
 @app.post("/stress-test", tags=["Prediction"])
 async def stress_test(payload: StressTestPayload):
-    """
-    Run multiple named scenarios simultaneously and return a side-by-side comparison.
-    Max 10 scenarios per call.
-    """
+    """Run multiple named scenarios simultaneously and return a side-by-side comparison."""
     try:
+        live_inputs = get_live_inputs()
         results = []
         for scenario in payload.scenarios:
-            inputs  = merge_inputs(LIVE_INPUTS, scenario.inputs)
+            inputs  = merge_inputs(live_inputs, scenario.inputs)
             outputs = run_all(inputs)
             pkg     = build_dashboard_package(inputs, to_dict(outputs), label=scenario.label)
             results.append({
@@ -386,8 +475,8 @@ async def stress_test(payload: StressTestPayload):
 @app.get("/dashboard", tags=["Dashboard"])
 async def dashboard():
     """
-    Full dashboard data package — live state, XP, badge eligibility,
-    status banner, and all KPI cards. Primary endpoint for the React dashboard.
+    Full dashboard data package — live state from PostgreSQL, XP, badge eligibility,
+    status banner, and all KPI cards.
     """
     try:
         inputs  = get_live_inputs()
@@ -405,43 +494,38 @@ async def update_inputs(payload: InputsPayload):
     """
     Accepts new business input values from the weekly wizard.
     1. Merges onto current live inputs
-    2. Writes to Dataverse (persistent across restarts and redeploys)
-    3. Updates in-memory LIVE_INPUTS as a fast cache
-    4. Saves a weekly snapshot row for historical tracking
-    5. Saves project rows if supplied
+    2. Writes to PostgreSQL (persistent across restarts, spin-downs, and devices)
+    3. Updates in-memory cache
+    4. Saves a snapshot row for historical tracking
     """
     global LIVE_INPUTS
     try:
         import dataclasses
-        current  = get_live_inputs()
-        updated  = merge_inputs(current, payload)
+        current = get_live_inputs()
+        updated = merge_inputs(current, payload)
 
-        # --- Persist to Dataverse ---
+        # ── Save to PostgreSQL ──
         inputs_dict = dataclasses.asdict(updated)
-        save_business_inputs(inputs_dict, business_id=JDAS_BUSINESS_ID)
+        projects    = payload.projects or []
+        save_inputs_to_db(JDAS_BUSINESS_ID, inputs_dict, projects)
 
-        # Save projects if wizard sent them
-        if payload.projects:
-            save_projects(payload.projects, business_id=JDAS_BUSINESS_ID)
-
-        # Update in-memory cache so next /dashboard call is instant
+        # ── Update in-memory cache ──
         LIVE_INPUTS = updated
 
-        # Run engine and save snapshot for history
+        # ── Run engine and save snapshot ──
         outputs = run_all(updated)
         o       = to_dict(outputs)
         try:
-            save_snapshot(o, business_id=JDAS_BUSINESS_ID)
+            save_snapshot_to_db(JDAS_BUSINESS_ID, o)
         except Exception as snap_err:
-            # Snapshot failure should not block the save response
-            logger.warning(f"Snapshot save failed (non-fatal): {snap_err}")
+            logger.warning(f"JDAS: Snapshot save failed (non-fatal): {snap_err}")
 
         pkg = build_dashboard_package(updated, o, label="updated")
         pkg["badges"] = badge_eligibility(updated, o)
 
         return {
-            "status":  "saved",
-            "message": "Numbers saved to Dataverse. Dashboard is now live.",
+            "status":   "saved",
+            "message":  "Numbers saved to PostgreSQL. Dashboard is now live on all devices.",
             "snapshot": pkg,
         }
     except Exception as e:
