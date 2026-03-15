@@ -29,6 +29,7 @@ from dataverse_connector import (
     save_projects,
     save_snapshot,
     dataverse_health_check,
+    bootstrap_schema,
     JDAS_BUSINESS_ID,
 )
 
@@ -99,6 +100,13 @@ async def load_saved_inputs_on_startup():
     """
     global LIVE_INPUTS
     import dataclasses
+
+    # Ensure PostgreSQL tables exist before any reads/writes
+    try:
+        bootstrap_schema()
+    except Exception as e:
+        logger.warning(f"⚠️  Startup: schema bootstrap failed ({e})")
+
     try:
         saved = load_business_inputs(JDAS_BUSINESS_ID)
         if saved:
