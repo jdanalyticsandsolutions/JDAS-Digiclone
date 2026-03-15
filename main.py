@@ -104,8 +104,11 @@ async def load_saved_inputs_on_startup():
     # Ensure PostgreSQL tables exist before any reads/writes
     try:
         bootstrap_schema()
+        logger.info("✅ Startup: PostgreSQL schema ready.")
     except Exception as e:
-        logger.warning(f"⚠️  Startup: schema bootstrap failed ({e})")
+        logger.error(f"❌ Startup: schema bootstrap failed: {e}")
+        # Don't attempt load if schema doesn't exist
+        return
 
     try:
         saved = load_business_inputs(JDAS_BUSINESS_ID)
