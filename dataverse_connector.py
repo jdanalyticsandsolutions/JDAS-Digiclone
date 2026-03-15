@@ -1,19 +1,16 @@
 """
-JDAS Dataverse Connector
-=========================
-Handles all reads and writes to Microsoft Dataverse for the Digital Clone system.
+JDAS Data Connector — PostgreSQL Backend
+==========================================
+Replaces the Dataverse connector with a PostgreSQL implementation.
+All function signatures are identical so main.py requires zero changes.
 
-Tables used:
-  jdas_business_inputs    — one active row per business (the wizard inputs)
-  jdas_business_snapshot  — weekly engine output history
+Uses the DATABASE_URL environment variable set in Render (auto-injected
+by the PostgreSQL environment group you linked).
+
+Tables created automatically on first startup:
+  jdas_business_inputs    — one active row per business (wizard inputs)
+  jdas_business_snapshots — weekly engine output history
   jdas_active_projects    — individual project rows
-  jdas_weekly_log         — owner-entered actuals for calibration
-
-Environment variables required (set in Render dashboard):
-  DATAVERSE_TENANT_ID     — Azure AD tenant ID
-  DATAVERSE_CLIENT_ID     — App registration client ID
-  DATAVERSE_CLIENT_SECRET — App registration client secret
-  DATAVERSE_ORG_URL       — e.g. https://yourorg.crm.dynamics.com
 """
 
 import os
@@ -22,158 +19,150 @@ import logging
 import datetime
 from typing import Optional, Dict, Any
 
-import requests
-from msal import ConfidentialClientApplication
+import psycopg2
+import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-TENANT_ID     = os.getenv("DATAVERSE_TENANT_ID", "")
-CLIENT_ID     = os.getenv("DATAVERSE_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("DATAVERSE_CLIENT_SECRET", "")
-ORG_URL       = os.getenv("DATAVERSE_ORG_URL", "").rstrip("/")
-
-# Dataverse table logical names (plural, as used in the Web API)
-TABLE_INPUTS    = "jdas_business_inputses"     # jdas_business_inputs
-TABLE_SNAPSHOT  = "jdas_business_snapshots"    # jdas_business_snapshot
-TABLE_PROJECTS  = "jdas_active_projectses"     # jdas_active_projects
-TABLE_WEEKLY    = "jdas_weekly_logs"           # jdas_weekly_log
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # The fixed business_id for JDAS own company record
-# When you onboard client businesses, each gets their own UUID here
 JDAS_BUSINESS_ID = "jdas-001"
 
-# ─── AUTH ─────────────────────────────────────────────────────────────────────
 
-_token_cache: Dict[str, Any] = {}
+# ─── CONNECTION ───────────────────────────────────────────────────────────────
 
-def get_access_token() -> str:
-    """Get a valid OAuth2 token for Dataverse. Caches until 5 min before expiry."""
-    now = datetime.datetime.utcnow().timestamp()
-    if _token_cache.get("expires_at", 0) > now + 300:
-        return _token_cache["access_token"]
-
-    if not all([TENANT_ID, CLIENT_ID, CLIENT_SECRET, ORG_URL]):
+def get_conn():
+    if not DATABASE_URL:
         raise RuntimeError(
-            "Dataverse credentials not configured. "
-            "Set DATAVERSE_TENANT_ID, DATAVERSE_CLIENT_ID, "
-            "DATAVERSE_CLIENT_SECRET, DATAVERSE_ORG_URL in Render."
+            "DATABASE_URL not configured. "
+            "Make sure the PostgreSQL environment group is linked in Render."
         )
-
-    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
-    scope     = [f"{ORG_URL}/.default"]
-
-    app = ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=authority,
-        client_credential=CLIENT_SECRET,
-    )
-    result = app.acquire_token_for_client(scopes=scope)
-
-    if "access_token" not in result:
-        error = result.get("error_description", result.get("error", "Unknown auth error"))
-        raise RuntimeError(f"Dataverse auth failed: {error}")
-
-    _token_cache["access_token"] = result["access_token"]
-    _token_cache["expires_at"]   = now + result.get("expires_in", 3600)
-    return _token_cache["access_token"]
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    return conn
 
 
-def _headers() -> dict:
-    return {
-        "Authorization":    f"Bearer {get_access_token()}",
-        "Content-Type":     "application/json",
-        "OData-MaxVersion": "4.0",
-        "OData-Version":    "4.0",
-        "Accept":           "application/json",
-        "Prefer":           "return=representation",
-    }
+# ─── SCHEMA BOOTSTRAP ─────────────────────────────────────────────────────────
+# Called once at startup — creates tables if they don't exist yet.
 
+def bootstrap_schema():
+    """Create all required tables if they don't already exist."""
+    ddl = """
+    CREATE TABLE IF NOT EXISTS jdas_business_inputs (
+        id                        SERIAL PRIMARY KEY,
+        business_id               TEXT NOT NULL UNIQUE,
+        base_leads_per_week       FLOAT,
+        marketing_multiplier      FLOAT,
+        active_workload_hrs       FLOAT,
+        owner_total_hours_week    FLOAT,
+        admin_hours_week          FLOAT,
+        utilization_target        FLOAT,
+        num_active_projects       INT,
+        num_subcontractors        INT,
+        owner_billing_rate        FLOAT,
+        owner_cost_rate           FLOAT,
+        owner_draw_monthly        FLOAT,
+        base_hourly_rate          FLOAT,
+        avg_hours_per_project     FLOAT,
+        base_win_rate             FLOAT,
+        fixed_monthly_expenses    FLOAT,
+        variable_monthly_expenses FLOAT,
+        starting_cash             FLOAT,
+        tax_reserve_rate          FLOAT,
+        current_retainer_clients  INT,
+        avg_retainer_value_monthly FLOAT,
+        current_month             INT,
+        last_updated              TIMESTAMP DEFAULT NOW()
+    );
 
-def _api(path: str) -> str:
-    return f"{ORG_URL}/api/data/v9.2/{path}"
+    CREATE TABLE IF NOT EXISTS jdas_business_snapshots (
+        id             SERIAL PRIMARY KEY,
+        business_id    TEXT NOT NULL,
+        week_of        DATE,
+        xp_score       FLOAT,
+        xp_title       TEXT,
+        cash_health    TEXT,
+        ending_cash    FLOAT,
+        weekly_burn    FLOAT,
+        backlog_hrs    FLOAT,
+        stress_score   FLOAT,
+        win_rate       FLOAT,
+        revenue_12w    FLOAT,
+        quality_score  FLOAT,
+        mrr            FLOAT,
+        generated_at   TIMESTAMP DEFAULT NOW()
+    );
 
-
-def _raise_for_status(res: requests.Response, context: str):
-    if not res.ok:
-        try:
-            detail = res.json().get("error", {}).get("message", res.text[:300])
-        except Exception:
-            detail = res.text[:300]
-        raise RuntimeError(f"Dataverse {context} failed ({res.status_code}): {detail}")
-
-
-# ─── FIELD MAPS ───────────────────────────────────────────────────────────────
-# Maps Python BusinessInputs field names → Dataverse column logical names.
-# Dataverse custom columns use the publisher prefix (jdas_).
-
-INPUTS_FIELD_MAP = {
-    "base_leads_per_week":        "jdas_base_leads_per_week",
-    "marketing_multiplier":       "jdas_marketing_multiplier",
-    "active_workload_hrs":        "jdas_active_workload_hrs",
-    "owner_total_hours_week":     "jdas_owner_total_hours_week",
-    "admin_hours_week":           "jdas_admin_hours_week",
-    "utilization_target":         "jdas_utilization_target",
-    "num_active_projects":        "jdas_num_active_projects",
-    "num_subcontractors":         "jdas_num_subcontractors",
-    "owner_billing_rate":         "jdas_owner_billing_rate",
-    "owner_cost_rate":            "jdas_owner_cost_rate",
-    "owner_draw_monthly":         "jdas_owner_draw_monthly",
-    "base_hourly_rate":           "jdas_base_hourly_rate",
-    "avg_hours_per_project":      "jdas_avg_hours_per_project",
-    "base_win_rate":              "jdas_base_win_rate",
-    "fixed_monthly_expenses":     "jdas_fixed_monthly_expenses",
-    "variable_monthly_expenses":  "jdas_variable_monthly_expenses",
-    "starting_cash":              "jdas_starting_cash",
-    "tax_reserve_rate":           "jdas_tax_reserve_rate",
-    "current_retainer_clients":   "jdas_current_retainer_clients",
-    "avg_retainer_value_monthly": "jdas_avg_retainer_value_monthly",
-    "current_month":              "jdas_current_month",
-}
-
-# Reverse map for reading back from Dataverse
-INPUTS_FIELD_MAP_REVERSE = {v: k for k, v in INPUTS_FIELD_MAP.items()}
+    CREATE TABLE IF NOT EXISTS jdas_active_projects (
+        id             SERIAL PRIMARY KEY,
+        business_id    TEXT NOT NULL,
+        project_code   TEXT,
+        client_name    TEXT,
+        project_name   TEXT,
+        hrs_remaining  FLOAT,
+        billing_rate   FLOAT,
+        status         TEXT,
+        last_updated   TIMESTAMP DEFAULT NOW()
+    );
+    """
+    try:
+        conn = get_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+        conn.close()
+        logger.info("✅ PostgreSQL schema bootstrapped.")
+    except Exception as e:
+        logger.error(f"Schema bootstrap error: {e}")
+        raise
 
 
 # ─── BUSINESS INPUTS — READ ───────────────────────────────────────────────────
 
+INPUTS_FIELDS = [
+    "base_leads_per_week", "marketing_multiplier", "active_workload_hrs",
+    "owner_total_hours_week", "admin_hours_week", "utilization_target",
+    "num_active_projects", "num_subcontractors", "owner_billing_rate",
+    "owner_cost_rate", "owner_draw_monthly", "base_hourly_rate",
+    "avg_hours_per_project", "base_win_rate", "fixed_monthly_expenses",
+    "variable_monthly_expenses", "starting_cash", "tax_reserve_rate",
+    "current_retainer_clients", "avg_retainer_value_monthly", "current_month",
+]
+
+
 def load_business_inputs(business_id: str = JDAS_BUSINESS_ID) -> Optional[Dict[str, Any]]:
     """
-    Load the most recent saved inputs for a business from Dataverse.
-    Returns a dict of Python field names → values, or None if no record exists yet.
+    Load saved inputs for a business from PostgreSQL.
+    Returns a dict of field names → values, or None if no record exists yet.
     """
     try:
-        select_cols = ",".join(INPUTS_FIELD_MAP.values())
-        url = _api(
-            f"{TABLE_INPUTS}"
-            f"?$filter=jdas_business_id eq '{business_id}'"
-            f"&$select=jdas_business_inputsid,{select_cols}"
-            f"&$orderby=modifiedon desc"
-            f"&$top=1"
-        )
-        res = requests.get(url, headers=_headers(), timeout=10)
-        _raise_for_status(res, "load_business_inputs GET")
+        conn = get_conn()
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM jdas_business_inputs WHERE business_id = %s LIMIT 1",
+                    (business_id,)
+                )
+                row = cur.fetchone()
+        conn.close()
 
-        rows = res.json().get("value", [])
-        if not rows:
+        if not row:
             logger.info(f"No saved inputs found for business_id={business_id}")
             return None
 
-        row = rows[0]
-        result = {"_record_id": row.get("jdas_business_inputsid")}
-        for dv_col, py_field in INPUTS_FIELD_MAP_REVERSE.items():
-            if dv_col in row:
-                result[py_field] = row[dv_col]
+        result = {"_record_id": row["id"]}
+        for field in INPUTS_FIELDS:
+            if field in row and row[field] is not None:
+                result[field] = row[field]
 
         logger.info(f"Loaded inputs for {business_id}: {len(result)-1} fields")
         return result
 
-    except RuntimeError:
-        raise
     except Exception as e:
         logger.error(f"load_business_inputs error: {e}")
-        raise RuntimeError(f"Failed to load inputs from Dataverse: {e}")
+        raise RuntimeError(f"Failed to load inputs from PostgreSQL: {e}")
 
 
 # ─── BUSINESS INPUTS — WRITE ──────────────────────────────────────────────────
@@ -184,39 +173,41 @@ def save_business_inputs(
     record_id: Optional[str] = None,
 ) -> str:
     """
-    Upsert business inputs to Dataverse.
-    If record_id is provided, PATCHes the existing row.
-    If not, checks for an existing row first, then creates or patches.
-    Returns the record ID (GUID) of the saved row.
+    Upsert business inputs to PostgreSQL.
+    Uses INSERT ... ON CONFLICT DO UPDATE so it always works regardless of
+    whether a row exists yet.
+    Returns the business_id as the record identifier.
     """
-    # Build the Dataverse payload
-    payload: Dict[str, Any] = {"jdas_business_id": business_id}
-    for py_field, dv_col in INPUTS_FIELD_MAP.items():
-        if py_field in inputs_dict:
-            payload[dv_col] = inputs_dict[py_field]
-    payload["jdas_last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
+    fields = [f for f in INPUTS_FIELDS if f in inputs_dict]
+    if not fields:
+        logger.warning("save_business_inputs called with no recognizable fields")
+        return business_id
 
-    # Try to find existing record if no ID provided
-    if not record_id:
-        existing = load_business_inputs(business_id)
-        if existing:
-            record_id = existing.get("_record_id")
+    set_clause = ", ".join(f"{f} = EXCLUDED.{f}" for f in fields)
+    col_names  = ", ".join(["business_id"] + fields + ["last_updated"])
+    placeholders = ", ".join(["%s"] * (len(fields) + 2))  # +2 for business_id and last_updated
 
-    if record_id:
-        # PATCH existing row
-        url = _api(f"{TABLE_INPUTS}({record_id})")
-        res = requests.patch(url, headers=_headers(), json=payload, timeout=10)
-        _raise_for_status(res, "save_business_inputs PATCH")
-        logger.info(f"Updated inputs for {business_id}, record {record_id}")
-        return record_id
-    else:
-        # POST new row
-        url = _api(TABLE_INPUTS)
-        res = requests.post(url, headers=_headers(), json=payload, timeout=10)
-        _raise_for_status(res, "save_business_inputs POST")
-        new_id = res.json().get("jdas_business_inputsid", "unknown")
-        logger.info(f"Created new inputs record for {business_id}: {new_id}")
-        return new_id
+    values = [business_id] + [inputs_dict[f] for f in fields] + [datetime.datetime.utcnow()]
+
+    sql = f"""
+        INSERT INTO jdas_business_inputs ({col_names})
+        VALUES ({placeholders})
+        ON CONFLICT (business_id) DO UPDATE SET
+            {set_clause},
+            last_updated = EXCLUDED.last_updated
+    """
+
+    try:
+        conn = get_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+        conn.close()
+        logger.info(f"Saved inputs for {business_id}")
+        return business_id
+    except Exception as e:
+        logger.error(f"save_business_inputs error: {e}")
+        raise RuntimeError(f"Failed to save inputs to PostgreSQL: {e}")
 
 
 # ─── PROJECTS — WRITE ─────────────────────────────────────────────────────────
@@ -226,51 +217,44 @@ def save_projects(
     business_id: str = JDAS_BUSINESS_ID,
 ) -> int:
     """
-    Upsert the project list for a business.
-    Deletes existing active projects for the business first, then inserts fresh rows.
+    Replace all active projects for a business with the supplied list.
     Returns count of projects saved.
     """
     if not projects:
         return 0
 
-    # Delete existing active project rows for this business
     try:
-        url = _api(f"{TABLE_PROJECTS}?$filter=jdas_business_id eq '{business_id}'&$select=jdas_active_projectsid")
-        res = requests.get(url, headers=_headers(), timeout=10)
-        _raise_for_status(res, "save_projects GET existing")
-        existing_rows = res.json().get("value", [])
-        for row in existing_rows:
-            rid = row.get("jdas_active_projectsid")
-            if rid:
-                del_res = requests.delete(_api(f"{TABLE_PROJECTS}({rid})"), headers=_headers(), timeout=10)
-                # 204 = success, 404 = already gone — both are fine
-                if del_res.status_code not in (204, 404):
-                    logger.warning(f"Could not delete project row {rid}: {del_res.status_code}")
+        conn = get_conn()
+        with conn:
+            with conn.cursor() as cur:
+                # Clear existing rows for this business
+                cur.execute(
+                    "DELETE FROM jdas_active_projects WHERE business_id = %s",
+                    (business_id,)
+                )
+                # Insert fresh rows
+                for p in projects:
+                    cur.execute("""
+                        INSERT INTO jdas_active_projects
+                            (business_id, project_code, client_name, project_name,
+                             hrs_remaining, billing_rate, status, last_updated)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        business_id,
+                        p.get("code", ""),
+                        p.get("client", ""),
+                        p.get("name", ""),
+                        p.get("hrs_remaining", 0),
+                        p.get("billing_rate", 0),
+                        p.get("status", "Active"),
+                        datetime.datetime.utcnow(),
+                    ))
+        conn.close()
+        logger.info(f"Saved {len(projects)} projects for {business_id}")
+        return len(projects)
     except Exception as e:
-        logger.warning(f"Could not clean up old project rows: {e}")
-
-    # Insert fresh rows
-    saved = 0
-    for p in projects:
-        payload = {
-            "jdas_business_id":    business_id,
-            "jdas_project_code":   p.get("code", ""),
-            "jdas_client_name":    p.get("client", ""),
-            "jdas_project_name":   p.get("name", ""),
-            "jdas_hrs_remaining":  p.get("hrs_remaining", 0),
-            "jdas_billing_rate":   p.get("billing_rate", 0),
-            "jdas_status":         p.get("status", "Active"),
-            "jdas_last_updated":   datetime.datetime.utcnow().isoformat() + "Z",
-        }
-        try:
-            res = requests.post(_api(TABLE_PROJECTS), headers=_headers(), json=payload, timeout=10)
-            _raise_for_status(res, f"save_projects POST {p.get('code','?')}")
-            saved += 1
-        except Exception as e:
-            logger.error(f"Failed to save project {p.get('code','?')}: {e}")
-
-    logger.info(f"Saved {saved}/{len(projects)} projects for {business_id}")
-    return saved
+        logger.error(f"save_projects error: {e}")
+        raise RuntimeError(f"Failed to save projects to PostgreSQL: {e}")
 
 
 # ─── SNAPSHOT — WRITE ─────────────────────────────────────────────────────────
@@ -280,56 +264,64 @@ def save_snapshot(
     business_id: str = JDAS_BUSINESS_ID,
 ) -> str:
     """
-    Write a weekly engine output snapshot to Dataverse for historical tracking.
-    Returns the new record ID.
+    Write a weekly engine output snapshot for historical tracking.
+    Returns a string record identifier.
     """
-    payload = {
-        "jdas_business_id":    business_id,
-        "jdas_week_of":        datetime.date.today().isoformat(),
-        "jdas_xp_score":       outputs.get("xp_score", 0),
-        "jdas_xp_title":       outputs.get("xp_title", ""),
-        "jdas_cash_health":    outputs.get("exp_cash_health_status", ""),
-        "jdas_ending_cash":    outputs.get("exp_ending_cash", 0),
-        "jdas_weekly_burn":    outputs.get("exp_weekly_burn", 0),
-        "jdas_backlog_hrs":    outputs.get("exp_backlog_hrs", 0),
-        "jdas_stress_score":   outputs.get("exp_capacity_stress_score", 0),
-        "jdas_win_rate":       outputs.get("exp_effective_win_rate", 0),
-        "jdas_revenue_12w":    outputs.get("exp_total_invoiced_12w", 0),
-        "jdas_quality_score":  outputs.get("exp_service_quality_score", 0),
-        "jdas_mrr":            outputs.get("exp_current_mrr", 0),
-        "jdas_generated_at":   datetime.datetime.utcnow().isoformat() + "Z",
-    }
     try:
-        res = requests.post(_api(TABLE_SNAPSHOT), headers=_headers(), json=payload, timeout=10)
-        _raise_for_status(res, "save_snapshot POST")
-        new_id = res.json().get("jdas_business_snapshotid", "unknown")
-        logger.info(f"Saved snapshot for {business_id}: {new_id}")
-        return new_id
+        conn = get_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO jdas_business_snapshots
+                        (business_id, week_of, xp_score, xp_title, cash_health,
+                         ending_cash, weekly_burn, backlog_hrs, stress_score,
+                         win_rate, revenue_12w, quality_score, mrr, generated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    business_id,
+                    datetime.date.today(),
+                    outputs.get("xp_score", 0),
+                    outputs.get("xp_title", ""),
+                    outputs.get("exp_cash_health_status", ""),
+                    outputs.get("exp_ending_cash", 0),
+                    outputs.get("exp_weekly_burn", 0),
+                    outputs.get("exp_backlog_hrs", 0),
+                    outputs.get("exp_capacity_stress_score", 0),
+                    outputs.get("exp_effective_win_rate", 0),
+                    outputs.get("exp_total_invoiced_12w", 0),
+                    outputs.get("exp_service_quality_score", 0),
+                    outputs.get("exp_current_mrr", 0),
+                    datetime.datetime.utcnow(),
+                ))
+        conn.close()
+        logger.info(f"Saved snapshot for {business_id}")
+        return business_id
     except Exception as e:
         logger.error(f"save_snapshot error: {e}")
-        raise RuntimeError(f"Failed to save snapshot: {e}")
+        raise RuntimeError(f"Failed to save snapshot to PostgreSQL: {e}")
 
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 
 def dataverse_health_check() -> Dict[str, Any]:
     """
-    Ping Dataverse to confirm connectivity and credentials are working.
-    Returns a status dict — safe to expose on the health endpoint.
+    Ping PostgreSQL to confirm connectivity.
+    Returns a status dict safe to expose on the health endpoint.
     """
     try:
-        token = get_access_token()
-        url = _api(f"{TABLE_INPUTS}?$top=1&$select=jdas_business_id")
-        res = requests.get(url, headers=_headers(), timeout=8)
+        conn = get_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        conn.close()
         return {
-            "connected":   res.ok,
-            "status_code": res.status_code,
-            "org_url":     ORG_URL,
-            "table":       TABLE_INPUTS,
+            "connected": True,
+            "backend":   "postgresql",
+            "status":    "ok",
         }
     except Exception as e:
         return {
             "connected": False,
+            "backend":   "postgresql",
             "error":     str(e),
-            "org_url":   ORG_URL,
         }
