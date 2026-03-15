@@ -40,7 +40,12 @@ def get_conn():
             "DATABASE_URL not configured. "
             "Make sure the PostgreSQL environment group is linked in Render."
         )
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    # Render internal Postgres doesn't need SSL; external does.
+    # Try without SSL first, fall back if needed.
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    except Exception:
+        conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 
@@ -49,75 +54,74 @@ def get_conn():
 
 def bootstrap_schema():
     """Create all required tables if they don't already exist."""
-    ddl = """
-    CREATE TABLE IF NOT EXISTS jdas_business_inputs (
-        id                        SERIAL PRIMARY KEY,
-        business_id               TEXT NOT NULL UNIQUE,
-        base_leads_per_week       FLOAT,
-        marketing_multiplier      FLOAT,
-        active_workload_hrs       FLOAT,
-        owner_total_hours_week    FLOAT,
-        admin_hours_week          FLOAT,
-        utilization_target        FLOAT,
-        num_active_projects       INT,
-        num_subcontractors        INT,
-        owner_billing_rate        FLOAT,
-        owner_cost_rate           FLOAT,
-        owner_draw_monthly        FLOAT,
-        base_hourly_rate          FLOAT,
-        avg_hours_per_project     FLOAT,
-        base_win_rate             FLOAT,
-        fixed_monthly_expenses    FLOAT,
-        variable_monthly_expenses FLOAT,
-        starting_cash             FLOAT,
-        tax_reserve_rate          FLOAT,
-        current_retainer_clients  INT,
-        avg_retainer_value_monthly FLOAT,
-        current_month             INT,
-        last_updated              TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS jdas_business_snapshots (
-        id             SERIAL PRIMARY KEY,
-        business_id    TEXT NOT NULL,
-        week_of        DATE,
-        xp_score       FLOAT,
-        xp_title       TEXT,
-        cash_health    TEXT,
-        ending_cash    FLOAT,
-        weekly_burn    FLOAT,
-        backlog_hrs    FLOAT,
-        stress_score   FLOAT,
-        win_rate       FLOAT,
-        revenue_12w    FLOAT,
-        quality_score  FLOAT,
-        mrr            FLOAT,
-        generated_at   TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS jdas_active_projects (
-        id             SERIAL PRIMARY KEY,
-        business_id    TEXT NOT NULL,
-        project_code   TEXT,
-        client_name    TEXT,
-        project_name   TEXT,
-        hrs_remaining  FLOAT,
-        billing_rate   FLOAT,
-        status         TEXT,
-        last_updated   TIMESTAMP DEFAULT NOW()
-    );
-    """
+    statements = [
+        """CREATE TABLE IF NOT EXISTS jdas_business_inputs (
+            id                         SERIAL PRIMARY KEY,
+            business_id                TEXT NOT NULL UNIQUE,
+            base_leads_per_week        FLOAT,
+            marketing_multiplier       FLOAT,
+            active_workload_hrs        FLOAT,
+            owner_total_hours_week     FLOAT,
+            admin_hours_week           FLOAT,
+            utilization_target         FLOAT,
+            num_active_projects        INT,
+            num_subcontractors         INT,
+            owner_billing_rate         FLOAT,
+            owner_cost_rate            FLOAT,
+            owner_draw_monthly         FLOAT,
+            base_hourly_rate           FLOAT,
+            avg_hours_per_project      FLOAT,
+            base_win_rate              FLOAT,
+            fixed_monthly_expenses     FLOAT,
+            variable_monthly_expenses  FLOAT,
+            starting_cash              FLOAT,
+            tax_reserve_rate           FLOAT,
+            current_retainer_clients   INT,
+            avg_retainer_value_monthly FLOAT,
+            current_month              INT,
+            last_updated               TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS jdas_business_snapshots (
+            id            SERIAL PRIMARY KEY,
+            business_id   TEXT NOT NULL,
+            week_of       DATE,
+            xp_score      FLOAT,
+            xp_title      TEXT,
+            cash_health   TEXT,
+            ending_cash   FLOAT,
+            weekly_burn   FLOAT,
+            backlog_hrs   FLOAT,
+            stress_score  FLOAT,
+            win_rate      FLOAT,
+            revenue_12w   FLOAT,
+            quality_score FLOAT,
+            mrr           FLOAT,
+            generated_at  TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS jdas_active_projects (
+            id            SERIAL PRIMARY KEY,
+            business_id   TEXT NOT NULL,
+            project_code  TEXT,
+            client_name   TEXT,
+            project_name  TEXT,
+            hrs_remaining FLOAT,
+            billing_rate  FLOAT,
+            status        TEXT,
+            last_updated  TIMESTAMP DEFAULT NOW()
+        )""",
+    ]
+    conn = get_conn()
     try:
-        conn = get_conn()
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(ddl)
-        conn.close()
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            for stmt in statements:
+                cur.execute(stmt)
         logger.info("✅ PostgreSQL schema bootstrapped.")
     except Exception as e:
-        logger.error(f"Schema bootstrap error: {e}")
-        raise
-
+        logger.error(f"Schema bootstrap error: {e}", exc_info=True)
+        raise RuntimeError(f"Schema bootstrap failed: {e}")
+    finally:
+        conn.close()
 
 # ─── BUSINESS INPUTS — READ ───────────────────────────────────────────────────
 
